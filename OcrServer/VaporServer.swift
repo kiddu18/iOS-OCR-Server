@@ -35,6 +35,12 @@ struct OCRResult: Content {
     let boxes: [OCRBoxItem]
 }
 
+struct DocOCRResult: Content {
+    let success: Bool
+    let message: String
+    let ocr_text: String
+}
+
 struct UploadResponse: Content {
     let success: Bool
     let message: String
@@ -159,6 +165,18 @@ actor VaporServer {
 
             // 從 actor 讀取屬性要 await
             let port = await self.port
+            
+            var docOcrCheckBox = ""
+            if #available(iOS 26, *) {
+                docOcrCheckBox = """
+                <div>
+                    <input type="checkbox" id="docOcr" name="docOcr"/>
+                    <label for="docOcr">Document Paragraph Detection</label>
+                </div><br>
+                """
+            } else {
+                docOcrCheckBox = ""
+            }
 
             let html = """
             <!doctype html>
@@ -202,7 +220,8 @@ actor VaporServer {
               -F "file=@01.png"</code></pre>
                 <hr>
                 <h3>OCR Test:</h3>
-                <form action="/upload" method="post" enctype="multipart/form-data">
+                <form id="ocrForm" action="/upload" method="post" enctype="multipart/form-data">
+                    \(docOcrCheckBox)
                     <label>
                         Choose file:
                         <input type="file" name="file" required>
@@ -211,6 +230,18 @@ actor VaporServer {
                     <input type="submit" value="Upload file">
                 </form>
             </body>
+            <script>
+                const form = document.getElementById("ocrForm");
+                const docOcr = document.getElementById("docOcr");
+
+                form.addEventListener("submit", function () {
+                    if (docOcr && docOcr.checked) {
+                        form.action = "/docOCR";
+                    } else {
+                        form.action = "/upload";
+                    }
+                });
+            </script>
             </html>
             """
             return Self.htmlResponse(html)
@@ -281,7 +312,6 @@ actor VaporServer {
                                                                                   ocr_boxes: []))
             }
             
-            
             if accept.contains("application/json") {
                 return try Self.jsonResponse(
                     .ok,
@@ -306,6 +336,114 @@ actor VaporServer {
                 </head>
                 <body>
                     <h2>OCR Result:</h2>
+                    <pre>\(escaped)</pre>
+                </body>
+                </html>
+                """
+                return Self.htmlResponse(html)
+            }
+        }
+        
+        // POST /docOCR（限制收集本文大小，可自行調整）
+        app.on(.POST, "docOCR", body: .collect(maxSize: "100mb")) { [weak self] req async throws -> Response in
+            if #unavailable(iOS 26) {
+                // iOS 26 以下
+                return try Self.jsonResponse(
+                    .ok,
+                    DocOCRResult(
+                        success: false,
+                        message: "This API is only supported on iOS 26 and later",
+                        ocr_text: ""
+                    )
+                )
+            }
+            
+            guard let self else { throw Abort(.internalServerError) }
+
+            struct Upload: Content { var file: File }
+
+            let upload: Upload
+            do {
+                upload = try req.content.decode(Upload.self)
+            } catch {
+                return try Self.jsonResponse(
+                    .badRequest,
+                    DocOCRResult(
+                        success: false,
+                        message: "Missing or empty 'file' part",
+                        ocr_text: ""
+                    )
+                )
+            }
+
+            guard upload.file.data.readableBytes > 0 else {
+                return try Self.jsonResponse(
+                    .badRequest,
+                    DocOCRResult(
+                        success: false,
+                        message: "Missing or empty 'file' part",
+                        ocr_text: ""
+                    )
+                )
+            }
+
+            // 取得 actor 內的參數（需 await）
+            let usesLanguageCorrection = await self.usesLanguageCorrection
+            let automaticallyDetectsLanguage = await self.automaticallyDetectsLanguage
+
+            // ByteBuffer -> Data
+            let data = Self.byteBufferToData(upload.file.data)
+
+            let accept = (req.headers.first(name: .accept) ?? "").lowercased()
+            
+            // OCR
+            var resultText : String? = nil
+            if #available(iOS 26, *) {
+                let docRecognizer = DocRecognizer(
+                    usesLanguageCorrection: usesLanguageCorrection,
+                    automaticallyDetectsLanguage: automaticallyDetectsLanguage
+                )
+                resultText = await docRecognizer.recognizeParagraphText(from: data)
+            }
+            
+            if resultText == nil && accept.contains("application/json") {
+                return try Self.jsonResponse(.internalServerError, DocOCRResult(success: false,
+                                                                                message: "OCR failed",
+                                                                                ocr_text: ""))
+            }
+            
+            if accept.contains("application/json") {
+                return try Self.jsonResponse(
+                    .ok,
+                    DocOCRResult(
+                        success: true,
+                        message: "OCR completed successfully",
+                        ocr_text: resultText ?? ""
+                    )
+                )
+            } else {
+                let escaped = Self.htmlEscape(resultText ?? "")
+                let html = """
+                <!doctype html>
+                <html>
+                <head>
+                    <meta charset="utf-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>OCR Server</title>
+                    <style>
+                        pre {
+                            width: 100%;
+                            max-width: 100%;
+                            box-sizing: border-box;
+                            white-space: pre-wrap;
+                            word-wrap: break-word;
+                            overflow-wrap: break-word;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <h2>OCR Result:</h2>
+                    <hr>
                     <pre>\(escaped)</pre>
                 </body>
                 </html>
