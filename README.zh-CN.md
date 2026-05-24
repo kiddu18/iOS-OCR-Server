@@ -7,7 +7,7 @@
 
 [English](README.md) | [日本語](README.ja.md) | [繁體中文](README.zh-TW.md) | **简体中文** | [한국어](README.ko.md) | [Français](README.fr.md)
 
-![image](image.jpg)
+![image](images/image.jpg)
 
 ## 使用方法
 
@@ -19,7 +19,7 @@
 
 - **OCR 测试：在您的计算机上打开网页浏览器，浏览应用程序显示的 IP 地址来执行 OCR 测试。**
 
-![image2](image2.png)
+![image2](images/image2.png)
 
 - **API 示例 - 通过 `upload` API 上传图像：**
 
@@ -232,7 +232,26 @@
 
   示例输出：
 
-  ![image3](image3.png)
+  ![image3](images/image3.png)
+
+
+## 文档段落识别（仅限 iOS 26 及以上）
+
+在网页上，勾选 `Document Paragraph Detection`：
+
+![image4](images/image4.png)
+
+段落识别结果：
+
+![image5](images/image5.png)
+
+或使用 `docOCR` API 识别文档段落：
+
+````
+curl -H "Accept: application/json" \
+    -X POST http://<YOUR IP>:8000/docOCR \
+    -F "file=@01.png"
+````
 
 
 ## 功能特色

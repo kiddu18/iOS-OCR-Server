@@ -7,7 +7,7 @@ Aucune dépendance cloud, utilisation illimitée, confidentialité complète.
 
 [English](README.md) | [日本語](README.ja.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | **Français**
 
-![image](image.jpg)
+![image](images/image.jpg)
 
 ## Comment utiliser
 
@@ -19,7 +19,7 @@ Aucune dépendance cloud, utilisation illimitée, confidentialité complète.
 
 - **Test OCR : Sur votre ordinateur, ouvrez un navigateur web et naviguez vers l'adresse IP affichée par l'application pour effectuer un test OCR.**
 
-![image2](image2.png)
+![image2](images/image2.png)
 
 - **Exemple d'API - Télécharger une image via l'API `upload` :**
 
@@ -232,7 +232,26 @@ Aucune dépendance cloud, utilisation illimitée, confidentialité complète.
 
   Exemple de sortie :
 
-  ![image3](image3.png)
+  ![image3](images/image3.png)
+
+
+## Détection des paragraphes de documents (iOS 26 et versions ultérieures uniquement)
+
+Sur la page web, cochez `Document Paragraph Detection` :
+
+![image4](images/image4.png)
+
+Résultats de la détection des paragraphes :
+
+![image5](images/image5.png)
+
+Ou reconnaissez les paragraphes de documents à l’aide de l’API `docOCR` :
+
+````
+curl -H "Accept: application/json" \
+    -X POST http://<YOUR IP>:8000/docOCR \
+    -F "file=@01.png"
+````
 
 
 ## Fonctionnalités

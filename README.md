@@ -7,7 +7,7 @@ No cloud dependencies, unlimited usage, complete privacy.
 
 **English** | [日本語](README.ja.md) | [繁體中文](README.zh-TW.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [Français](README.fr.md)
 
-![image](image.jpg)
+![image](images/image.jpg)
 
 ## How to Use
 
@@ -19,7 +19,7 @@ No cloud dependencies, unlimited usage, complete privacy.
 
 - **OCR Test: On your computer, open a web browser and navigate to the IP address displayed by the app to perform an OCR test.**
 
-![image2](image2.png)
+![image2](images/image2.png)
 
 - **API Example - Upload an image via `upload` API:**
 
@@ -232,7 +232,26 @@ No cloud dependencies, unlimited usage, complete privacy.
 
   Sample Output:
 
-  ![image3](image3.png)
+  ![image3](images/image3.png)
+
+
+## Document Paragraph Detection (iOS 26+ Only)
+
+On the webpage, check `Document Paragraph Detection`:
+
+![image4](images/image4.png)
+
+Paragraph detection results:
+
+![image5](images/image5.png)
+
+Or recognize document paragraphs using the `docOCR` API:
+
+````
+curl -H "Accept: application/json" \
+    -X POST http://<YOUR IP>:8000/docOCR \
+    -F "file=@01.png"
+````
 
 
 ## Features
