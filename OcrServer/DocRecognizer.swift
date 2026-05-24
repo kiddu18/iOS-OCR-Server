@@ -30,25 +30,11 @@ class DocRecognizer {
             return ""
         }
 
-        let titleText = document.title.map(normalizeTextBlock)
         let paragraphTexts = document.paragraphs
             .map(normalizeTextBlock)
             .filter { !$0.isEmpty }
 
-        let textBlocks = mergeTitle(titleText, with: paragraphTexts)
-        return textBlocks.joined(separator: "\n\n")
-    }
-
-    private func mergeTitle(_ title: String?, with paragraphs: [String]) -> [String] {
-        guard let title, !title.isEmpty else {
-            return paragraphs
-        }
-
-        guard paragraphs.first != title else {
-            return paragraphs
-        }
-
-        return [title] + paragraphs
+        return mergeParagraphsSplitByOCR(paragraphTexts).joined(separator: "\n\n")
     }
 
     private func normalizeTextBlock(_ textBlock: DocumentObservation.Container.Text) -> String {
@@ -62,6 +48,33 @@ class DocRecognizer {
         }
 
         return joinLinesInSameParagraph(lines)
+    }
+
+    private func mergeParagraphsSplitByOCR(_ paragraphs: [String]) -> [String] {
+        paragraphs.reduce(into: []) { result, paragraph in
+            guard let previousParagraph = result.last,
+                  shouldMergeParagraph(previousParagraph, with: paragraph) else {
+                result.append(paragraph)
+                return
+            }
+
+            result[result.count - 1] = previousParagraph
+                + (shouldInsertSpace(between: previousParagraph, and: paragraph) ? " " : "")
+                + paragraph
+        }
+    }
+
+    private func shouldMergeParagraph(_ previousParagraph: String, with nextParagraph: String) -> Bool {
+        guard let previousLastScalar = previousParagraph.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.last,
+              let nextFirstScalar = nextParagraph.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.first else {
+            return false
+        }
+
+        guard !previousLastScalar.isStrongParagraphEnding else {
+            return false
+        }
+
+        return nextFirstScalar.isLowercaseLatin
     }
 
     private func normalizeTranscript(_ text: String) -> String {
@@ -95,6 +108,14 @@ class DocRecognizer {
 }
 
 private extension Unicode.Scalar {
+    var isLowercaseLatin: Bool {
+        (0x0061...0x007A).contains(value)
+    }
+
+    var isStrongParagraphEnding: Bool {
+        ".!?。！？:：;；".unicodeScalars.contains(self)
+    }
+
     var isCJK: Bool {
         (0x4E00...0x9FFF).contains(value) ||
         (0x3400...0x4DBF).contains(value) ||
