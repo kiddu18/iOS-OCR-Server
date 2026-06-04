@@ -255,7 +255,7 @@ curl -H "Accept: application/json" \
 
 The JSON response looks like this:
 
-```
+```json
 {
     "success": true,
     "message": "OCR completed successfully",
