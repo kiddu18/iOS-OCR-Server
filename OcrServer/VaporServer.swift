@@ -756,44 +756,54 @@ class FinancialAmountsAgent: AccountingAgent {
             }
         }
         
-        // Pas 2: Extragere TVA per cote
-        // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50
-        let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})[,.][0-9]{1,2}\\s*%?\\s*([0-9]+[,.][0-9]{2})"
-        var foundVatAmounts: [Double] = []
-        var foundVatPercentages: [String] = []
+        let isReceipt = result.documentType == "Chitanță POS" || result.documentType == "Chitanță de mână"
         
-        if let regex = try? NSRegularExpression(pattern: vatPattern, options: []) {
-            let nsString = fullText as NSString
-            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
-            
-            for match in results {
-                if match.numberOfRanges > 2 {
-                    let pctString = nsString.substring(with: match.range(at: 1))
-                    let valString = nsString.substring(with: match.range(at: 2))
-                    
-                    foundVatPercentages.append("\(pctString)%")
-                    let sanitizedVal = valString.replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(sanitizedVal) {
-                        foundVatAmounts.append(val)
-                    }
-                }
-            }
-        }
-        
-        if !foundVatAmounts.isEmpty {
-            let sumVat = foundVatAmounts.reduce(0, +)
-            result.vatAmount = (sumVat * 100).rounded() / 100 // Rotunjire 2 zecimale
-            result.vatPercentages = Array(Set(foundVatPercentages)).joined(separator: ", ")
-            result.vatRequiresVerification = false
-            
-            if let total = result.totalAmount {
-                result.baseAmount = ((total - result.vatAmount!) * 100).rounded() / 100
-            }
-        } else {
-            // Nu exista linii TVA
+        if isReceipt {
+            // Chitantele sunt doar dovezi de plata, nu contin TVA deductibil in mod direct.
             result.vatAmount = 0
             result.vatPercentages = "-"
             result.baseAmount = result.totalAmount
+            result.vatRequiresVerification = false
+        } else {
+            // Pas 2: Extragere TVA per cote
+            // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50
+            let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})[,.][0-9]{1,2}\\s*%?\\s*([0-9]+[,.][0-9]{2})"
+            var foundVatAmounts: [Double] = []
+            var foundVatPercentages: [String] = []
+            
+            if let regex = try? NSRegularExpression(pattern: vatPattern, options: []) {
+                let nsString = fullText as NSString
+                let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+                
+                for match in results {
+                    if match.numberOfRanges > 2 {
+                        let pctString = nsString.substring(with: match.range(at: 1))
+                        let valString = nsString.substring(with: match.range(at: 2))
+                        
+                        foundVatPercentages.append("\(pctString)%")
+                        let sanitizedVal = valString.replacingOccurrences(of: ",", with: ".")
+                        if let val = Double(sanitizedVal) {
+                            foundVatAmounts.append(val)
+                        }
+                    }
+                }
+            }
+            
+            if !foundVatAmounts.isEmpty {
+                let sumVat = foundVatAmounts.reduce(0, +)
+                result.vatAmount = (sumVat * 100).rounded() / 100 // Rotunjire 2 zecimale
+                result.vatPercentages = Array(Set(foundVatPercentages)).joined(separator: ", ")
+                result.vatRequiresVerification = false
+                
+                if let total = result.totalAmount {
+                    result.baseAmount = ((total - result.vatAmount!) * 100).rounded() / 100
+                }
+            } else {
+                // Nu exista linii TVA
+                result.vatAmount = 0
+                result.vatPercentages = "-"
+                result.baseAmount = result.totalAmount
+            }
         }
     }
 }
