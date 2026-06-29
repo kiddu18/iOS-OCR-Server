@@ -118,9 +118,11 @@ function renderPipeline() {
         const numarHtml = item.status === 'done' ? `<input class="inline-input" style="width: 100px" value="${d.documentNumber || ''}" onchange="updateItem('${item.id}', 'documentNumber', this.value)">` : '-';
         const dataHtml = item.status === 'done' ? `<input class="inline-input" style="width: 110px" value="${d.documentDate || ''}" onchange="updateItem('${item.id}', 'documentDate', this.value)">` : '-';
         const cuiHtml = item.status === 'done' ? `<input class="inline-input" value="${d.cui || ''}" onchange="updateItem('${item.id}', 'cui', this.value)" title="${d.companyName || ''}">` : '-';
-        const totalHtml = item.status === 'done' ? `<input class="inline-input" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
-        const vatHtml = item.status === 'done' ? `<input class="inline-input" value="${d.vatAmount !== undefined ? d.vatAmount : ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">` : '-';
-        const vatPctHtml = item.status === 'done' ? `<input class="inline-input" value="${d.vatPercentages || ''}" onchange="updateItem('${item.id}', 'vatPercentages', this.value)">` : '-';
+        
+        const baseHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.baseAmount !== undefined ? d.baseAmount : ''}" onchange="updateItem('${item.id}', 'baseAmount', this.value)">` : '-';
+        const totalHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
+        const vatHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.vatAmount !== undefined ? d.vatAmount : ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">` : '-';
+        const vatPctHtml = item.status === 'done' ? `<input class="inline-input" style="width: 60px" value="${d.vatPercentages || ''}" onchange="updateItem('${item.id}', 'vatPercentages', this.value)">` : '-';
         const accHtml = item.status === 'done' ? `<input class="inline-input" value="${d.suggestedAccount || ''}" onchange="updateItem('${item.id}', 'suggestedAccount', this.value)">` : '-';
 
         tbody.innerHTML += `
@@ -136,9 +138,10 @@ function renderPipeline() {
                 <td>${numarHtml}</td>
                 <td>${dataHtml}</td>
                 <td>${cuiHtml}</td>
-                <td>${totalHtml}</td>
+                <td>${baseHtml}</td>
                 <td>${vatHtml}</td>
                 <td>${vatPctHtml}</td>
+                <td>${totalHtml}</td>
                 <td>${accHtml}</td>
                 <td><button class="btn-text" onclick="removePipelineItem('${item.id}')" style="color:var(--danger)">Șterge</button></td>
             </tr>
