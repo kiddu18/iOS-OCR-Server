@@ -428,14 +428,7 @@ actor VaporServer {
             
             // OCR
             var resultText : String? = nil
-            if #available(iOS 26, *) {
-                let docRecognizer = DocRecognizer(
-                    usesLanguageCorrection: usesLanguageCorrection,
-                    automaticallyDetectsLanguage: automaticallyDetectsLanguage
-                )
-                resultText = await docRecognizer.recognizeParagraphText(from: data)
-            }
-            
+            // DocRecognizer is currently unsupported on this SDK version.
             if resultText == nil && accept.contains("application/json") {
                 return try Self.jsonResponse(.internalServerError, DocOCRResult(success: false,
                                                                                 message: "OCR failed",
