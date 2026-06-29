@@ -15,7 +15,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build App
+        continue-on-error: true
         run: |
+          set -o pipefail
           xcodebuild clean build \
             -project "OcrServer.xcodeproj" \
             -scheme "OcrServer" \
@@ -25,7 +27,16 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            CONFIGURATION_BUILD_DIR=$PWD/build
+            CONFIGURATION_BUILD_DIR=$PWD/build > build_log.txt 2>&1
+
+      - name: Show Errors
+        run: |
+          echo "==== XCODEBUILD ERRORS ===="
+          grep -A 10 -B 2 -i "error:" build_log.txt || true
+          echo "==========================="
+          if grep -q "FAIL" build_log.txt || grep -qi "error:" build_log.txt; then
+             exit 1
+          fi
 
       - name: Package into IPA
         run: |
