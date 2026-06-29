@@ -117,7 +117,8 @@ function renderPipeline() {
         const docHtml = item.status === 'done' ? `<div style="font-size: 0.8rem">Serie: ${d.documentSeries || '-'}<br>Nr: ${d.documentNumber || '-'}<br>Data: ${d.documentDate || '-'}</div>` : '-';
         const cuiHtml = item.status === 'done' ? `<input class="inline-input" value="${d.cui || ''}" onchange="updateItem('${item.id}', 'cui', this.value)" title="${d.companyName || ''}">` : '-';
         const totalHtml = item.status === 'done' ? `<input class="inline-input" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
-        const vatHtml = item.status === 'done' ? `<input class="inline-input" value="${d.vatAmount || ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">` : '-';
+        const vatHtml = item.status === 'done' ? `<input class="inline-input" value="${d.vatAmount !== undefined ? d.vatAmount : ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">` : '-';
+        const vatPctHtml = item.status === 'done' ? `<input class="inline-input" value="${d.vatPercentages || ''}" onchange="updateItem('${item.id}', 'vatPercentages', this.value)">` : '-';
         const accHtml = item.status === 'done' ? `<input class="inline-input" value="${d.suggestedAccount || ''}" onchange="updateItem('${item.id}', 'suggestedAccount', this.value)">` : '-';
 
         tbody.innerHTML += `
@@ -129,6 +130,7 @@ function renderPipeline() {
                 <td>${cuiHtml}</td>
                 <td>${totalHtml}</td>
                 <td>${vatHtml}</td>
+                <td>${vatPctHtml}</td>
                 <td>${accHtml}</td>
                 <td><button class="btn-text" onclick="removePipelineItem('${item.id}')" style="color:var(--danger)">Șterge</button></td>
             </tr>
@@ -230,9 +232,10 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
             [mapping.date]: d.documentDate || '',
             [mapping.cui]: d.cui || '',
             [mapping.company]: d.companyName || '',
-            [mapping.total]: d.totalAmount || '',
-            [mapping.base]: d.baseAmount || '',
-            [mapping.vat]: d.vatAmount || '',
+            [mapping.total]: d.totalAmount !== undefined ? d.totalAmount : '',
+            [mapping.base]: d.baseAmount !== undefined ? d.baseAmount : '',
+            [mapping.vat]: d.vatAmount !== undefined ? d.vatAmount : '',
+            [mapping.vatPercentages]: d.vatPercentages || '',
             [mapping.account]: d.suggestedAccount || ''
         };
     });

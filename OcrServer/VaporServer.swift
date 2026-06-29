@@ -531,6 +531,8 @@ public struct AccountingResult: Content {
     public var vatAmount: Double?
     public var vatRequiresVerification: Bool = true
     
+    public var vatPercentages: String?
+    
     public var baseAmount: Double?
     
     public var fiscalWarnings: [String] = []
@@ -554,6 +556,9 @@ class DocumentClassificationAgent: AccountingAgent {
         } else if fullText.contains("FACTURA") || fullText.contains("INVOICE") {
             result.documentType = "Factură"
             result.documentTypeRequiresVerification = false
+        } else if fullText.contains("CHITANTA") || fullText.contains("POS") || fullText.contains("TRANZACTIE") {
+            result.documentType = "Chitanță"
+            result.documentTypeRequiresVerification = false
         } else if fullText.contains("BENZINA") || fullText.contains("MOTORINA") || fullText.contains("DIESEL") {
             result.documentType = "Fișă Combustibil"
             result.documentTypeRequiresVerification = false
@@ -568,7 +573,7 @@ class DocumentDetailsAgent: AccountingAgent {
     func process(textBlocks: [String], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: "\n").uppercased()
         
-        let seriesPattern = "(?:SERIA|SERIE|SERIA:)\\s*([A-Z]{1,5})"
+        let seriesPattern = "(?:SERIA|SERIE|SERIA:|CHITANTA\\s*SERIA)\\s*([A-Z]{1,5})"
         if let regex = try? NSRegularExpression(pattern: seriesPattern, options: []) {
             let nsString = fullText as NSString
             let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
@@ -577,7 +582,7 @@ class DocumentDetailsAgent: AccountingAgent {
             }
         }
         
-        let numberPattern = "(?:NR\\.?|NUMAR|BON\\s*NR\\.?|FACTURA\\s*NR\\.?)\\s*[:]*\\s*([0-9]{1,10})"
+        let numberPattern = "(?:NR\\.?|NUMAR|BON\\s*NR\\.?|FACTURA\\s*NR\\.?|CHITANTA\\s*NR\\.?|BF\\.?)\\s*[:]*\\s*([0-9]{1,10})"
         if let regex = try? NSRegularExpression(pattern: numberPattern, options: []) {
             let nsString = fullText as NSString
             let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
@@ -711,52 +716,79 @@ class FinancialAmountsAgent: AccountingAgent {
     func process(textBlocks: [String], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: "\n").uppercased()
         
-        let pattern = "([0-9]+[.,][0-9]{2})"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return }
-        
-        let nsString = fullText as NSString
-        let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
-        
-        var amounts: [Double] = []
-        for match in results {
-            let matchedString = nsString.substring(with: match.range)
+        // Pas 1: Cauta explicitly TOTAL, SUMA, ACHITAT
+        let totalPattern = "(?:TOTAL|SUMA|ACHITAT|REST)\\s*[:]*\\s*([0-9]+[.,][0-9]{2})"
+        if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
+           let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
+            let nsString = fullText as NSString
+            let matchedString = nsString.substring(with: match.range(at: 1))
             let sanitized = matchedString.replacingOccurrences(of: ",", with: ".")
             if let val = Double(sanitized) {
-                amounts.append(val)
+                result.totalAmount = val
+                result.totalRequiresVerification = false
             }
         }
         
-        amounts.sort(by: >)
-        
-        if !amounts.isEmpty {
-            let potentialTotal = amounts[0]
-            result.totalAmount = potentialTotal
-            
-            var foundMatch = false
-            if amounts.count > 1 {
-                for i in 1..<amounts.count {
-                    for j in (i+1)..<amounts.count {
-                        let sum = amounts[i] + amounts[j]
-                        if abs(sum - potentialTotal) < 0.05 {
-                            result.baseAmount = max(amounts[i], amounts[j])
-                            result.vatAmount = min(amounts[i], amounts[j])
-                            result.totalRequiresVerification = false
-                            result.vatRequiresVerification = false
-                            foundMatch = true
-                            break
-                        }
+        // Daca nu gaseste TOTAL explicit, ia cel mai mare numar care NU pare a fi un procentaj
+        if result.totalAmount == nil {
+            let pattern = "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)"
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let nsString = fullText as NSString
+                let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+                var amounts: [Double] = []
+                for match in results {
+                    let matchedString = nsString.substring(with: match.range(at: 1))
+                    let sanitized = matchedString.replacingOccurrences(of: ",", with: ".")
+                    if let val = Double(sanitized), val != 24.00, val != 19.00, val != 9.00, val != 5.00 {
+                        amounts.append(val)
                     }
-                    if foundMatch { break }
+                }
+                amounts.sort(by: >)
+                if !amounts.isEmpty {
+                    result.totalAmount = amounts[0]
+                    result.totalRequiresVerification = true // Nu am gasit "TOTAL", deci cere verificare
                 }
             }
+        }
+        
+        // Pas 2: Extragere TVA per cote
+        // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50
+        let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})[,.][0-9]{1,2}\\s*%?\\s*([0-9]+[,.][0-9]{2})"
+        var foundVatAmounts: [Double] = []
+        var foundVatPercentages: [String] = []
+        
+        if let regex = try? NSRegularExpression(pattern: vatPattern, options: []) {
+            let nsString = fullText as NSString
+            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
             
-            if !foundMatch {
-                result.totalRequiresVerification = true
-                result.vatRequiresVerification = true
+            for match in results {
+                if match.numberOfRanges > 2 {
+                    let pctString = nsString.substring(with: match.range(at: 1))
+                    let valString = nsString.substring(with: match.range(at: 2))
+                    
+                    foundVatPercentages.append("\(pctString)%")
+                    let sanitizedVal = valString.replacingOccurrences(of: ",", with: ".")
+                    if let val = Double(sanitizedVal) {
+                        foundVatAmounts.append(val)
+                    }
+                }
+            }
+        }
+        
+        if !foundVatAmounts.isEmpty {
+            let sumVat = foundVatAmounts.reduce(0, +)
+            result.vatAmount = (sumVat * 100).rounded() / 100 // Rotunjire 2 zecimale
+            result.vatPercentages = Array(Set(foundVatPercentages)).joined(separator: ", ")
+            result.vatRequiresVerification = false
+            
+            if let total = result.totalAmount {
+                result.baseAmount = ((total - result.vatAmount!) * 100).rounded() / 100
             }
         } else {
-            result.totalRequiresVerification = true
-            result.vatRequiresVerification = true
+            // Nu exista linii TVA
+            result.vatAmount = 0
+            result.vatPercentages = "-"
+            result.baseAmount = result.totalAmount
         }
     }
 }
