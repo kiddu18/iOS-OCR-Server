@@ -114,6 +114,7 @@ function renderPipeline() {
         
         // Editable fields if done
         const typeHtml = item.status === 'done' ? `<input class="inline-input" value="${d.documentType || ''}" onchange="updateItem('${item.id}', 'documentType', this.value)">` : '-';
+        const docHtml = item.status === 'done' ? `<div style="font-size: 0.8rem">Serie: ${d.documentSeries || '-'}<br>Nr: ${d.documentNumber || '-'}<br>Data: ${d.documentDate || '-'}</div>` : '-';
         const cuiHtml = item.status === 'done' ? `<input class="inline-input" value="${d.cui || ''}" onchange="updateItem('${item.id}', 'cui', this.value)" title="${d.companyName || ''}">` : '-';
         const totalHtml = item.status === 'done' ? `<input class="inline-input" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
         const vatHtml = item.status === 'done' ? `<input class="inline-input" value="${d.vatAmount || ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">` : '-';
@@ -124,6 +125,7 @@ function renderPipeline() {
                 <td>${statusHtml}</td>
                 <td><a href="#" onclick="viewImage('${item.id}')" style="color:var(--accent)">${item.name}</a></td>
                 <td>${typeHtml}</td>
+                <td>${docHtml}</td>
                 <td>${cuiHtml}</td>
                 <td>${totalHtml}</td>
                 <td>${vatHtml}</td>
@@ -223,6 +225,9 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
         return {
             [mapping.filename]: item.name,
             [mapping.type]: d.documentType || '',
+            [mapping.series]: d.documentSeries || '',
+            [mapping.number]: d.documentNumber || '',
+            [mapping.date]: d.documentDate || '',
             [mapping.cui]: d.cui || '',
             [mapping.company]: d.companyName || '',
             [mapping.total]: d.totalAmount || '',

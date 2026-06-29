@@ -522,6 +522,10 @@ public struct AccountingResult: Content {
     public var documentType: String?
     public var documentTypeRequiresVerification: Bool = true
     
+    public var documentSeries: String?
+    public var documentNumber: String?
+    public var documentDate: String?
+    
     public var cui: String?
     public var cuiRequiresVerification: Bool = true
     public var companyName: String?
@@ -563,6 +567,39 @@ class DocumentClassificationAgent: AccountingAgent {
         } else {
             result.documentType = "Necunoscut"
             result.documentTypeRequiresVerification = true
+        }
+    }
+}
+
+class DocumentDetailsAgent: AccountingAgent {
+    func process(textBlocks: [String], result: inout AccountingResult) async {
+        let fullText = textBlocks.joined(separator: "\n").uppercased()
+        
+        let seriesPattern = "(?:SERIA|SERIE|SERIA:)\\s*([A-Z]{1,5})"
+        if let regex = try? NSRegularExpression(pattern: seriesPattern, options: []) {
+            let nsString = fullText as NSString
+            let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+            if let m = match, m.numberOfRanges > 1 {
+                result.documentSeries = nsString.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        
+        let numberPattern = "(?:NR\\.?|NUMAR|BON\\s*NR\\.?|FACTURA\\s*NR\\.?)\\s*[:]*\\s*([0-9]{1,10})"
+        if let regex = try? NSRegularExpression(pattern: numberPattern, options: []) {
+            let nsString = fullText as NSString
+            let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+            if let m = match, m.numberOfRanges > 1 {
+                result.documentNumber = nsString.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        
+        let datePattern = "(?:DATA\\s*[:]*\\s*)?([0-3][0-9][\\.\\-\\/][0-1][0-9][\\.\\-\\/]20[0-9]{2})"
+        if let regex = try? NSRegularExpression(pattern: datePattern, options: []) {
+            let nsString = fullText as NSString
+            let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+            if let m = match, m.numberOfRanges > 1 {
+                result.documentDate = nsString.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
         }
     }
 }
@@ -811,6 +848,7 @@ public class AccountingOrchestrator {
         
         let agents: [AccountingAgent] = [
             DocumentClassificationAgent(),
+            DocumentDetailsAgent(),
             CuiExtractorAgent(),
             FinancialAmountsAgent(),
             FiscalComplianceAgent(buyerCui: buyerCui)
