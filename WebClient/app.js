@@ -114,7 +114,9 @@ function renderPipeline() {
         
         // Editable fields if done
         const typeHtml = item.status === 'done' ? `<input class="inline-input" value="${d.documentType || ''}" onchange="updateItem('${item.id}', 'documentType', this.value)">` : '-';
-        const docHtml = item.status === 'done' ? `<div style="font-size: 0.8rem">Serie: ${d.documentSeries || '-'}<br>Nr: ${d.documentNumber || '-'}<br>Data: ${d.documentDate || '-'}</div>` : '-';
+        const serieHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.documentSeries || ''}" onchange="updateItem('${item.id}', 'documentSeries', this.value)">` : '-';
+        const numarHtml = item.status === 'done' ? `<input class="inline-input" style="width: 100px" value="${d.documentNumber || ''}" onchange="updateItem('${item.id}', 'documentNumber', this.value)">` : '-';
+        const dataHtml = item.status === 'done' ? `<input class="inline-input" style="width: 110px" value="${d.documentDate || ''}" onchange="updateItem('${item.id}', 'documentDate', this.value)">` : '-';
         const cuiHtml = item.status === 'done' ? `<input class="inline-input" value="${d.cui || ''}" onchange="updateItem('${item.id}', 'cui', this.value)" title="${d.companyName || ''}">` : '-';
         const totalHtml = item.status === 'done' ? `<input class="inline-input" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
         const vatHtml = item.status === 'done' ? `<input class="inline-input" value="${d.vatAmount !== undefined ? d.vatAmount : ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">` : '-';
@@ -123,10 +125,16 @@ function renderPipeline() {
 
         tbody.innerHTML += `
             <tr>
-                <td>${statusHtml}</td>
-                <td><a href="#" onclick="viewImage('${item.id}')" style="color:var(--accent)">${item.name}</a></td>
-                <td>${typeHtml}</td>
-                <td>${docHtml}</td>
+                <td>
+                    <span class="status-badge ${item.status === 'done' ? 'status-valid' : (item.status === 'error' ? 'status-error' : 'status-pending')}">
+                        ${item.status === 'done' ? '<i class="ph ph-check-circle"></i> VALIDAT' : (item.status === 'error' ? '<i class="ph ph-warning"></i> EROARE' : '<i class="ph ph-spinner ph-spin"></i> PROCESARE')}
+                    </span>
+                </td>
+                <td><a href="#" onclick="showImageModal('${item.id}')" style="color:var(--primary);text-decoration:none;font-weight:500;">${item.file.name}</a></td>
+                <td>${item.status === 'done' ? d.documentType || 'Necunoscut' : '-'}</td>
+                <td>${serieHtml}</td>
+                <td>${numarHtml}</td>
+                <td>${dataHtml}</td>
                 <td>${cuiHtml}</td>
                 <td>${totalHtml}</td>
                 <td>${vatHtml}</td>

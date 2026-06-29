@@ -550,14 +550,19 @@ class DocumentClassificationAgent: AccountingAgent {
     func process(textBlocks: [String], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: " ").uppercased()
         
-        if fullText.contains("BON FISCAL") || fullText.contains("CASA DE MARCAT") || fullText.contains("BF") {
-            result.documentType = "Bon Fiscal"
-            result.documentTypeRequiresVerification = false
-        } else if fullText.contains("FACTURA") || fullText.contains("INVOICE") {
+        let hasPOS = fullText.contains("TERMINAL ID") || fullText.contains("PIN VERIFICAT") || fullText.contains("TRANZACTIE ACCEPTATA") || fullText.contains("TRANZACTIE APROBATA") || fullText.contains("POS")
+        
+        if fullText.contains("FACTURA") || fullText.contains("INVOICE") {
             result.documentType = "Factură"
             result.documentTypeRequiresVerification = false
-        } else if fullText.contains("CHITANTA") || fullText.contains("POS") || fullText.contains("TRANZACTIE") {
-            result.documentType = "Chitanță"
+        } else if fullText.contains("BON FISCAL") || fullText.contains("CASA DE MARCAT") || fullText.contains("BF.") || fullText.contains("BF ") {
+            result.documentType = "Bon Fiscal"
+            result.documentTypeRequiresVerification = false
+        } else if hasPOS {
+            result.documentType = "Chitanță POS"
+            result.documentTypeRequiresVerification = false
+        } else if fullText.contains("CHITANTA") {
+            result.documentType = "Chitanță de mână"
             result.documentTypeRequiresVerification = false
         } else if fullText.contains("BENZINA") || fullText.contains("MOTORINA") || fullText.contains("DIESEL") {
             result.documentType = "Fișă Combustibil"
