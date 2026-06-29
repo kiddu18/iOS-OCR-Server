@@ -14,23 +14,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build Archive
+      - name: Build App
         run: |
-          xcodebuild clean archive \
+          xcodebuild clean build \
             -project "OcrServer.xcodeproj" \
-            -scheme "OcrServer" \
+            -alltargets \
             -configuration Release \
             -sdk iphoneos \
-            -archivePath $PWD/OcrServer.xcarchive \
+            -destination "generic/platform=iOS" \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGNING_ALLOWED=NO \
+            CONFIGURATION_BUILD_DIR=$PWD/build
 
       - name: Package into IPA
         run: |
           mkdir -p Payload
-          cp -r OcrServer.xcarchive/Products/Applications/OcrServer.app Payload/
+          cp -r build/OcrServer.app Payload/
           zip -qr OcrServer.ipa Payload
+
+
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
