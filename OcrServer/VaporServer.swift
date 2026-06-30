@@ -777,7 +777,7 @@ class FinancialAmountsAgent: AccountingAgent {
                 for match in results {
                     let matchedString = nsString.substring(with: match.range(at: 1))
                     let sanitized = matchedString.replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(sanitized), val != 24.00, val != 19.00, val != 9.00, val != 5.00 {
+                    if let val = Double(sanitized), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00 {
                         amounts.append(val)
                     }
                 }
