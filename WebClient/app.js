@@ -73,7 +73,7 @@ fileInput.addEventListener('change', e => handleFiles(e.target.files));
 
 function handleFiles(files) {
     Array.from(files).forEach(file => {
-        if (!file.type.startsWith('image/')) return;
+        if (!file.type.startsWith('image/') && file.type !== 'application/pdf') return;
         const id = Date.now() + Math.random().toString(36).substr(2, 9);
         pipeline.push({ id, file, status: 'pending', name: file.name, data: null, url: URL.createObjectURL(file) });
     });
@@ -93,7 +93,7 @@ function suggestAccount(companyName, fileType) {
 function renderPipeline() {
     const tbody = document.getElementById('pipeline-body');
     if (pipeline.length === 0) {
-        tbody.innerHTML = `<tr id="empty-row"><td colspan="8" style="text-align: center; color: var(--text-muted); padding: 40px;">Niciun document în așteptare. Încarcă fișiere pentru a începe.</td></tr>`;
+        tbody.innerHTML = `<tr id="empty-row"><td colspan="13" style="text-align: center; color: var(--text-muted); padding: 40px;">Niciun document în așteptare. Încarcă fișiere pentru a începe.</td></tr>`;
         return;
     }
     
@@ -227,29 +227,64 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
         return;
     }
 
-    // Varianta A: Construire dupa header-ele configurate
-    const mapping = {};
-    document.querySelectorAll('.export-col').forEach(input => {
-        mapping[input.dataset.key] = input.value;
-    });
+    let rows = [];
 
-    const rows = doneItems.map(item => {
-        const d = item.data;
-        return {
-            [mapping.filename]: item.name,
-            [mapping.type]: d.documentType || '',
-            [mapping.series]: d.documentSeries || '',
-            [mapping.number]: d.documentNumber || '',
-            [mapping.date]: d.documentDate || '',
-            [mapping.cui]: d.cui || '',
-            [mapping.company]: d.companyName || '',
-            [mapping.total]: d.totalAmount !== undefined ? d.totalAmount : '',
-            [mapping.base]: d.baseAmount !== undefined ? d.baseAmount : '',
-            [mapping.vat]: d.vatAmount !== undefined ? d.vatAmount : '',
-            [mapping.vatPercentages]: d.vatPercentages || '',
-            [mapping.account]: d.suggestedAccount || ''
-        };
-    });
+    if (templateHeaders && templateHeaders.length > 0) {
+        // Varianta B: Template Personalizat
+        const customMapping = {};
+        document.querySelectorAll('.custom-mapping-select').forEach(select => {
+            if (select.value) {
+                customMapping[select.dataset.syskey] = select.value;
+            }
+        });
+
+        rows = doneItems.map(item => {
+            const d = item.data;
+            const row = {};
+            // Initialize with empty strings for all template headers to maintain structure
+            templateHeaders.forEach(th => row[th] = '');
+            
+            if (customMapping.filename) row[customMapping.filename] = item.name;
+            if (customMapping.type) row[customMapping.type] = d.documentType || '';
+            if (customMapping.series) row[customMapping.series] = d.documentSeries || '';
+            if (customMapping.number) row[customMapping.number] = d.documentNumber || '';
+            if (customMapping.date) row[customMapping.date] = d.documentDate || '';
+            if (customMapping.cui) row[customMapping.cui] = d.cui || '';
+            if (customMapping.company) row[customMapping.company] = d.companyName || '';
+            if (customMapping.total) row[customMapping.total] = d.totalAmount !== undefined ? d.totalAmount : '';
+            if (customMapping.base) row[customMapping.base] = d.baseAmount !== undefined ? d.baseAmount : '';
+            if (customMapping.vat) row[customMapping.vat] = d.vatAmount !== undefined ? d.vatAmount : '';
+            if (customMapping.vatPercentages) row[customMapping.vatPercentages] = d.vatPercentages || '';
+            if (customMapping.account) row[customMapping.account] = d.suggestedAccount || '';
+            
+            return row;
+        });
+
+    } else {
+        // Varianta A: Construire dupa header-ele configurate
+        const mapping = {};
+        document.querySelectorAll('.export-col').forEach(input => {
+            mapping[input.dataset.key] = input.value;
+        });
+
+        rows = doneItems.map(item => {
+            const d = item.data;
+            return {
+                [mapping.filename]: item.name,
+                [mapping.type]: d.documentType || '',
+                [mapping.series]: d.documentSeries || '',
+                [mapping.number]: d.documentNumber || '',
+                [mapping.date]: d.documentDate || '',
+                [mapping.cui]: d.cui || '',
+                [mapping.company]: d.companyName || '',
+                [mapping.total]: d.totalAmount !== undefined ? d.totalAmount : '',
+                [mapping.base]: d.baseAmount !== undefined ? d.baseAmount : '',
+                [mapping.vat]: d.vatAmount !== undefined ? d.vatAmount : '',
+                [mapping.vatPercentages]: d.vatPercentages || '',
+                [mapping.account]: d.suggestedAccount || ''
+            };
+        });
+    }
 
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
@@ -314,3 +349,79 @@ async function checkConnection() {
 }
 setInterval(checkConnection, 3000);
 checkConnection();
+
+// --- Logica Varianta B: Incarcare Sablon Excel ---
+let templateHeaders = [];
+const templateUpload = document.getElementById('template-upload');
+const templateMappingUI = document.getElementById('template-mapping-ui');
+const mappingContainer = document.getElementById('mapping-container');
+
+const systemFields = [
+    { key: 'filename', label: 'Nume Fișier Original' },
+    { key: 'type', label: 'Tip Document' },
+    { key: 'cui', label: 'CUI Furnizor' },
+    { key: 'company', label: 'Denumire Furnizor' },
+    { key: 'series', label: 'Serie Document' },
+    { key: 'number', label: 'Număr Document' },
+    { key: 'date', label: 'Dată Document' },
+    { key: 'total', label: 'Total (cu TVA)' },
+    { key: 'base', label: 'Bază (fără TVA)' },
+    { key: 'vat', label: 'TVA Valoric' },
+    { key: 'vatPercentages', label: 'Cote TVA (%)' },
+    { key: 'account', label: 'Cont Sugerat' }
+];
+
+if(templateUpload) {
+    templateUpload.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function(event) {
+            const data = new Uint8Array(event.target.result);
+            const workbook = XLSX.read(data, {type: 'array'});
+            const firstSheetName = workbook.SheetNames[0];
+            const worksheet = workbook.Sheets[firstSheetName];
+            
+            // Daca foaia e complet goala
+            if(!worksheet['!ref']) {
+                alert('Fișierul Excel încărcat pare a fi gol (nu s-a detectat cap de tabel).');
+                return;
+            }
+            
+            // Extrage prima linie (row 1)
+            const range = XLSX.utils.decode_range(worksheet['!ref']);
+            templateHeaders = [];
+            for (let C = range.s.c; C <= range.e.c; ++C) {
+                const cellAddress = {c: C, r: range.s.r};
+                const cellRef = XLSX.utils.encode_cell(cellAddress);
+                const cell = worksheet[cellRef];
+                let header = cell ? cell.v : `Coloana ${C+1}`;
+                templateHeaders.push(header);
+            }
+            
+            // Genereaza UI pentru Mapare
+            mappingContainer.innerHTML = '';
+            systemFields.forEach(field => {
+                // Incercam sa ghicim o mapare automata daca numele seamana (simplificat)
+                let options = `<option value="">-- Ignoră (Rămâne gol) --</option>`;
+                templateHeaders.forEach(th => {
+                    const isMatch = th.toString().toLowerCase().includes(field.label.split(' ')[0].toLowerCase());
+                    options += `<option value="${th}" ${isMatch ? 'selected' : ''}>${th}</option>`;
+                });
+                
+                mappingContainer.innerHTML += `
+                    <div>
+                        <label>${field.label}:</label>
+                        <select class="custom-mapping-select" data-syskey="${field.key}" style="width: 100%; padding: 8px; background: var(--bg-main); border: 1px solid var(--border); color: white; border-radius: 4px;">
+                            ${options}
+                        </select>
+                    </div>
+                `;
+            });
+            
+            templateMappingUI.classList.remove('hidden');
+        };
+        reader.readAsArrayBuffer(file);
+    });
+}
