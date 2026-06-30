@@ -618,27 +618,41 @@ class CuiExtractorAgent: AccountingAgent {
     func process(textBlocks: [String], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: " ").uppercased()
         
-        let pattern = "(?:CUI|CIF|COD FISCAL|RO)?[\\s\\.:]*([0-9]{2,10})"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return }
-        
-        let nsString = fullText as NSString
-        let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
-        
-        var foundCuis: [String] = []
-        for match in results {
-            if match.numberOfRanges > 1 {
-                let matchedString = nsString.substring(with: match.range(at: 1))
-                foundCuis.append(matchedString)
+        // Cautam mai intai cu prefix explicit (CIF, CUI, RO) pentru a evita alarme false
+        let primaryPattern = "(?:C\\.?U\\.?I\\.?|C\\.?I\\.?F\\.?|COD FISCAL|RO)[\\s\\.:]*([0-9]{2,10})"
+        if let regex = try? NSRegularExpression(pattern: primaryPattern, options: []) {
+            let nsString = fullText as NSString
+            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+            for match in results {
+                if match.numberOfRanges > 1 {
+                    let cuiCandidate = nsString.substring(with: match.range(at: 1))
+                    if isValidCUI(cui: cuiCandidate) {
+                        result.cui = cuiCandidate
+                        result.cuiRequiresVerification = false
+                        await verifyWithANAF(cui: cuiCandidate, result: &result)
+                        return
+                    }
+                }
             }
         }
         
-        for cuiCandidate in foundCuis {
-            if isValidCUI(cui: cuiCandidate) {
-                result.cui = cuiCandidate
-                result.cuiRequiresVerification = false
-                
-                await verifyWithANAF(cui: cuiCandidate, result: &result)
-                return
+        // Daca nu am gasit cu prefix, incercam orice numar care trece testul de validare CUI
+        let fallbackPattern = "\\b([0-9]{2,10})\\b"
+        if let regex = try? NSRegularExpression(pattern: fallbackPattern, options: []) {
+            let nsString = fullText as NSString
+            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+            
+            for match in results {
+                if match.numberOfRanges > 1 {
+                    let cuiCandidate = nsString.substring(with: match.range(at: 1))
+        
+                    if isValidCUI(cui: cuiCandidate) {
+                        result.cui = cuiCandidate
+                        result.cuiRequiresVerification = false
+                        await verifyWithANAF(cui: cuiCandidate, result: &result)
+                        return
+                    }
+                }
             }
         }
         
@@ -773,8 +787,8 @@ class FinancialAmountsAgent: AccountingAgent {
             result.vatRequiresVerification = false
         } else {
             // Pas 2: Extragere TVA per cote
-            // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50
-            let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})[,.][0-9]{1,2}\\s*%?\\s*([0-9]+[,.][0-9]{2})"
+            // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50 (optional cu zecimale la cota)
+            let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*%?\\s*([0-9]+[,.][0-9]{2})"
             var foundVatAmounts: [Double] = []
             var foundVatPercentages: [String] = []
             
