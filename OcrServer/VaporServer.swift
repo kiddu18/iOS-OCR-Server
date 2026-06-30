@@ -948,4 +948,56 @@ public class AccountingOrchestrator {
         }
         return result
     }
+    
+    // Separa cutiile de text in documente distincte (clustering spatial)
+    public func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
+        guard !boxes.isEmpty else { return [] }
+        
+        let sortedHeights = boxes.map { $0.h }.sorted()
+        let medianHeight = sortedHeights[sortedHeights.count / 2]
+        
+        // Daca distanta pe X e de ~10 ori mai mare decat inaltimea textului,
+        // sau distanta pe Y e de ~8 ori mai mare decat inaltimea textului, sunt documente diferite.
+        let horizontalThreshold = medianHeight * 10.0
+        let verticalThreshold = medianHeight * 8.0
+        
+        var clusters: [[OCRBoxItem]] = []
+        var unvisited = boxes
+        
+        while let first = unvisited.popLast() {
+            var currentCluster = [first]
+            var toProcess = [first]
+            
+            while let current = toProcess.popLast() {
+                var newUnvisited: [OCRBoxItem] = []
+                for box in unvisited {
+                    // Calcul distanta intre doua dreptunghiuri
+                    let dx = max(0, max(current.x - (box.x + box.w), box.x - (current.x + current.w)))
+                    let dy = max(0, max(current.y - (box.y + box.h), box.y - (current.y + current.h)))
+                    
+                    if dx < horizontalThreshold && dy < verticalThreshold {
+                        currentCluster.append(box)
+                        toProcess.append(box)
+                    } else {
+                        newUnvisited.append(box)
+                    }
+                }
+                unvisited = newUnvisited
+            }
+            // Sortam de sus in jos, stanga la dreapta
+            currentCluster.sort { 
+                if abs($0.y - $1.y) < medianHeight { return $0.x < $1.x }
+                return $0.y < $1.y 
+            }
+            clusters.append(currentCluster)
+        }
+        
+        // Excludem gunoaiele (clustere cu doar 1-2 linii de text)
+        let validClusters = clusters.filter { $0.count >= 3 }
+        // Daca nu ramane nimic, le intoarcem pe toate ca un singur document (fallback)
+        if validClusters.isEmpty { return [boxes] }
+        
+        // Sortam clusterele de la stanga la dreapta (cum stau bonurile pe masa)
+        return validClusters.sorted { $0[0].x < $1[0].x }
+    }
 }
