@@ -321,6 +321,8 @@ buyerCuiInput.addEventListener('input', (e) => {
 // Verificare Conexiune (Ping)
 const statusIndicator = document.getElementById('connection-status');
 async function checkConnection() {
+    if (isProcessing) return; // Serverul ruleaza OCR, nu trimitem ping ca sa nu luam timeout fals
+    
     const ip = serverIpInput.value.trim();
     if (!ip) {
         statusIndicator.textContent = 'Deconectat';
