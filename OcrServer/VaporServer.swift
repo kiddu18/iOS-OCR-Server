@@ -950,7 +950,7 @@ public class AccountingOrchestrator {
     }
     
     // Separa cutiile de text in documente distincte (clustering spatial)
-    public func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
+    func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
         guard !boxes.isEmpty else { return [] }
         
         let sortedHeights = boxes.map { $0.h }.sorted()
