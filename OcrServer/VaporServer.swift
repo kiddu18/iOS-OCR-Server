@@ -49,6 +49,7 @@ struct UploadResponse: Content {
     let image_height: Int
     let ocr_boxes: [OCRBoxItem]
     var accounting_data: AccountingResult? = nil
+    var accounting_data_array: [AccountingResult]? = nil
 }
 
 actor VaporServer {
@@ -334,9 +335,19 @@ actor VaporServer {
             let result = await textRecognizer.getOcrResult(data: data)
             
             var accountingData: AccountingResult? = nil
-            if let boxes = result?.boxes {
-                let texts = boxes.map { $0.text }
-                accountingData = await AccountingOrchestrator.shared.processOcrResult(textBlocks: texts, buyerCui: upload.buyer_cui)
+            var accountingDataArray: [AccountingResult] = []
+            
+            if let boxes = result?.boxes, !boxes.isEmpty {
+                let clusters = AccountingOrchestrator.shared.clusterBoxes(boxes)
+                
+                for cluster in clusters {
+                    let texts = cluster.map { $0.text }
+                    let clusterResult = await AccountingOrchestrator.shared.processOcrResult(textBlocks: texts, buyerCui: upload.buyer_cui)
+                    accountingDataArray.append(clusterResult)
+                }
+                
+                // Pentru compatibilitate backward, primul element e in accountingData
+                accountingData = accountingDataArray.first
             }
             
             if result == nil && accept.contains("application/json") {
@@ -358,7 +369,8 @@ actor VaporServer {
                         image_width: result?.image_width ?? 0,
                         image_height: result?.image_height ?? 0,
                         ocr_boxes: result?.boxes ?? [],
-                        accounting_data: accountingData
+                        accounting_data: accountingData,
+                        accounting_data_array: accountingDataArray
                     )
                 )
             } else {

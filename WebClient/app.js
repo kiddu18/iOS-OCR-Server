@@ -203,7 +203,30 @@ async function processNext() {
         if (!response.ok) throw new Error('Network error');
         const data = await response.json();
         
-        if (data.success && data.accounting_data) {
+        if (data.success && data.accounting_data_array && data.accounting_data_array.length > 0) {
+            // Daca avem un singur bon gasit, updatam randul curent
+            if (data.accounting_data_array.length === 1) {
+                nextItem.data = data.accounting_data_array[0];
+                nextItem.data.suggestedAccount = suggestAccount(nextItem.data.companyName, nextItem.data.documentType);
+                nextItem.status = 'done';
+            } else {
+                // Daca avem mai multe, stergem randul vechi si cream N randuri noi
+                pipeline = pipeline.filter(x => x.id !== nextItem.id);
+                data.accounting_data_array.forEach((accData, idx) => {
+                    const newId = nextItem.id + "_" + idx;
+                    accData.suggestedAccount = suggestAccount(accData.companyName, accData.documentType);
+                    pipeline.push({
+                        id: newId,
+                        file: nextItem.file,
+                        name: `${nextItem.name} (Bon ${idx + 1})`,
+                        status: 'done',
+                        data: accData,
+                        url: nextItem.url
+                    });
+                });
+            }
+        } else if (data.success && data.accounting_data) {
+            // Compatibilitate backward
             nextItem.data = data.accounting_data;
             nextItem.data.suggestedAccount = suggestAccount(nextItem.data.companyName, nextItem.data.documentType);
             nextItem.status = 'done';
