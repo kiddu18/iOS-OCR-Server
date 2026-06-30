@@ -263,3 +263,21 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
 
 // Init
 renderRules();
+
+// Salvare Setari Server (IP si CUI)
+const serverIpInput = document.getElementById('server-ip');
+const buyerCuiInput = document.getElementById('buyer-cui');
+
+if (localStorage.getItem('serverIp')) {
+    serverIpInput.value = localStorage.getItem('serverIp');
+}
+if (localStorage.getItem('buyerCui')) {
+    buyerCuiInput.value = localStorage.getItem('buyerCui');
+}
+
+serverIpInput.addEventListener('input', (e) => {
+    localStorage.setItem('serverIp', e.target.value);
+});
+buyerCuiInput.addEventListener('input', (e) => {
+    localStorage.setItem('buyerCui', e.target.value);
+});
