@@ -277,7 +277,40 @@ if (localStorage.getItem('buyerCui')) {
 
 serverIpInput.addEventListener('input', (e) => {
     localStorage.setItem('serverIp', e.target.value);
+    checkConnection();
 });
 buyerCuiInput.addEventListener('input', (e) => {
     localStorage.setItem('buyerCui', e.target.value);
 });
+
+// Verificare Conexiune (Ping)
+const statusIndicator = document.getElementById('connection-status');
+async function checkConnection() {
+    const ip = serverIpInput.value.trim();
+    if (!ip) {
+        statusIndicator.textContent = 'Deconectat';
+        statusIndicator.style.background = 'var(--danger)';
+        return;
+    }
+    
+    try {
+        // AbortController pentru timeout (in caz ca fetch-ul ramane "agatat")
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2000);
+        
+        const res = await fetch(`${ip}/ping`, { method: 'GET', signal: controller.signal });
+        clearTimeout(timeoutId);
+        
+        if (res.ok) {
+            statusIndicator.textContent = 'Conectat';
+            statusIndicator.style.background = 'var(--valid)';
+        } else {
+            throw new Error('Not OK');
+        }
+    } catch (e) {
+        statusIndicator.textContent = 'Deconectat';
+        statusIndicator.style.background = 'var(--danger)';
+    }
+}
+setInterval(checkConnection, 3000);
+checkConnection();

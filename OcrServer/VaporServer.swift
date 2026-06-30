@@ -168,6 +168,13 @@ actor VaporServer {
     // MARK: - Routes
 
     private func routes(_ app: Application) throws {
+        // GET /ping
+        app.get("ping") { req async throws -> Response in
+            var headers = HTTPHeaders()
+            headers.add(name: .contentType, value: "application/json")
+            return Response(status: .ok, headers: headers, body: .init(string: "{\"status\":\"ok\"}"))
+        }
+        
         // GET /
         app.get { [weak self] req async throws -> Response in
             guard let self else { throw Abort(.internalServerError) }

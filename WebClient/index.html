@@ -24,7 +24,10 @@
                 <a href="#" onclick="switchTab('export')"><i class="ph ph-export"></i> Setări Export</a>
             </nav>
             <div class="server-config">
-                <label>Server IP (iPhone)</label>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+                    <label style="margin-bottom: 0;">Server IP (iPhone)</label>
+                    <span id="connection-status" style="font-size: 0.75rem; font-weight: 600; padding: 2px 6px; border-radius: 4px; background: var(--danger); color: white;">Deconectat</span>
+                </div>
                 <input type="text" id="server-ip" value="http://192.168.1.11:8000" placeholder="ex: http://192.168.1.x:8000" style="margin-bottom: 12px;">
                 <label>CUI Firma Mea (Cumpărător)</label>
                 <input type="text" id="buyer-cui" value="" placeholder="ex: RO12345678">
