@@ -77,6 +77,10 @@ function handleFiles(files) {
         const id = Date.now() + Math.random().toString(36).substr(2, 9);
         pipeline.push({ id, file, status: 'pending', name: file.name, data: null, url: URL.createObjectURL(file) });
     });
+    
+    // Stergem selectia anterioara pentru a putea uploada acelasi fisier din nou fara refresh
+    fileInput.value = '';
+    
     renderPipeline();
     processNext();
 }
