@@ -341,7 +341,32 @@ actor VaporServer {
                 let clusters = AccountingOrchestrator.shared.clusterBoxes(boxes)
                 
                 for cluster in clusters {
-                    let texts = cluster.map { $0.text }
+                    // Grupam cutiile pe linii folosind axa Y
+                    let sortedByY = cluster.sorted { $0.y < $1.y }
+                    var lines: [[OCRBoxItem]] = []
+                    if !sortedByY.isEmpty {
+                        var currentLine = [sortedByY[0]]
+                        let sortedHeights = sortedByY.map { $0.h }.sorted()
+                        let medianHeight = sortedHeights[sortedHeights.count / 2]
+                        let yTolerance = medianHeight * 0.4
+                        
+                        for box in sortedByY.dropFirst() {
+                            if abs(box.y - currentLine[0].y) < yTolerance {
+                                currentLine.append(box)
+                            } else {
+                                lines.append(currentLine)
+                                currentLine = [box]
+                            }
+                        }
+                        lines.append(currentLine)
+                    }
+                    
+                    // Sortam fiecare linie de la stanga la dreapta si unim textul
+                    let texts = lines.map { line -> String in
+                        let sortedLine = line.sorted { $0.x < $1.x }
+                        return sortedLine.map { $0.text }.joined(separator: " ")
+                    }
+                    
                     let clusterResult = await AccountingOrchestrator.shared.processOcrResult(textBlocks: texts, buyerCui: upload.buyer_cui)
                     accountingDataArray.append(clusterResult)
                 }
@@ -630,8 +655,8 @@ class CuiExtractorAgent: AccountingAgent {
     func process(textBlocks: [String], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: " ").uppercased()
         
-        // Cautam mai intai cu prefix explicit (CIF, CUI, RO) pentru a evita alarme false
-        let primaryPattern = "(?:C\\.?U\\.?I\\.?|C\\.?I\\.?F\\.?|COD FISCAL|RO)[\\s\\.:]*([0-9]{2,10})"
+        // Cautam mai intai cu prefix explicit (CIF, CUI, COD FISCAL, RO) pentru a evita alarme false
+        let primaryPattern = "(?:C\\.?U\\.?I\\.?|C\\.?I\\.?F\\.?|COD FISCAL|RO|R0)?[\\s\\.:\\-]*([0-9]{2,10})"
         if let regex = try? NSRegularExpression(pattern: primaryPattern, options: []) {
             let nsString = fullText as NSString
             let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
@@ -799,8 +824,8 @@ class FinancialAmountsAgent: AccountingAgent {
             result.vatRequiresVerification = false
         } else {
             // Pas 2: Extragere TVA per cote
-            // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50 (optional cu zecimale la cota si caractere extra)
-            let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*%?[^\\d]{0,15}?([0-9]+[,.][0-9]{2})"
+            // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50 (optional cu zecimale la cota)
+            let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*%?[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
             var foundVatAmounts: [Double] = []
             var foundVatPercentages: [String] = []
             
@@ -824,7 +849,7 @@ class FinancialAmountsAgent: AccountingAgent {
             
             // Fallback: Daca nu s-a gasit nicio cota explicita, cautam "TOTAL TVA"
             if foundVatAmounts.isEmpty {
-                let totalVatPattern = "TOTAL\\s*TVA[^\\d]{0,15}?([0-9]+[,.][0-9]{2})"
+                let totalVatPattern = "TOTAL\\s*TVA[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
                 if let regex = try? NSRegularExpression(pattern: totalVatPattern, options: []) {
                     let nsString = fullText as NSString
                     if let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length)), match.numberOfRanges > 1 {
