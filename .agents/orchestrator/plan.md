@@ -15,9 +15,9 @@
 | # | Name | Scope | Dependencies | Status |
 |---|---|---|---|---|
 | 1 | Codebase Analysis and Test Design | Trace VaporServer.swift spatial logic, identify edge cases, design test scenarios (CUI override, total vs total tva) | None | DONE |
-| 2 | Test Suite Implementation | Implement Python simulation of Swift agents and run the automated test cases | M1 | IN_PROGRESS |
-| 3 | Verification & Edge Case Validation | Verify test correctness, confirm fixes work correctly and do not crash on unexpectedly formatted receipts | M2 | PLANNED |
-| 4 | Final Reporting | Synthesize findings into the final manual review and test results report | M3 | PLANNED |
+| 2 | Test Suite Implementation | Implement Python simulation of Swift agents and run the automated test cases | M1 | DONE |
+| 3 | Verification & Edge Case Validation | Verify test correctness, confirm fixes work correctly and do not crash on unexpectedly formatted receipts | M2 | DONE |
+| 4 | Final Reporting | Synthesize findings into the final manual review and test results report | M3 | DONE |
 
 ## Interface Contracts
 - Input to `AccountingOrchestrator.processOcrResult`: Array of OCRBoxItem JSONs, optional buyer CUI string.

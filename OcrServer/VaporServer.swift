@@ -1041,56 +1041,146 @@ public class AccountingOrchestrator {
         return result
     }
     
-    // Separa cutiile de text in documente distincte (clustering spatial)
+    // Separa cutiile de text in documente distincte
     func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
-        guard !boxes.isEmpty else { return [] }
+        guard boxes.count > 1 else { return [boxes] }
         
         let sortedHeights = boxes.map { $0.h }.sorted()
         let medianHeight = sortedHeights[sortedHeights.count / 2]
         
-        // Daca distanta pe X e de ~10 ori mai mare decat inaltimea textului,
-        // sau distanta pe Y e de ~8 ori mai mare decat inaltimea textului, sunt documente diferite.
-        let horizontalThreshold = medianHeight * 10.0
-        let verticalThreshold = medianHeight * 8.0
+        // 1. Anchor-based clustering (bazat pe CUI/CIF)
+        let cuiPattern = "(?i)(?:CUI|CIF|FISCAL|C\\.I\\.F|C\\.F|RO)\\s*[:.]?\\s*(?:RO)?\\s*([0-9]{2,10})"
+        var anchors: [OCRBoxItem] = []
+        if let regex = try? NSRegularExpression(pattern: cuiPattern, options: []) {
+            for box in boxes {
+                let text = box.text.uppercased().replacingOccurrences(of: " ", with: "")
+                if regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: text.utf16.count)) != nil {
+                    anchors.append(box)
+                }
+            }
+        }
+        
+        // Filtram ancorele prea apropiate (ca sa nu avem 2 ancore pe acelasi bon, ex: COD FISCAL si RO...)
+        var uniqueAnchors: [OCRBoxItem] = []
+        for a in anchors {
+            let isTooClose = uniqueAnchors.contains { u in
+                abs(u.x - a.x) < medianHeight * 10.0 && abs(u.y - a.y) < medianHeight * 15.0
+            }
+            if !isTooClose {
+                uniqueAnchors.append(a)
+            }
+        }
         
         var clusters: [[OCRBoxItem]] = []
-        var unvisited = boxes
         
-        while let first = unvisited.popLast() {
-            var currentCluster = [first]
-            var toProcess = [first]
-            
-            while let current = toProcess.popLast() {
-                var newUnvisited: [OCRBoxItem] = []
-                for box in unvisited {
-                    // Calcul distanta intre doua dreptunghiuri
-                    let dx = max(0, max(current.x - (box.x + box.w), box.x - (current.x + current.w)))
-                    let dy = max(0, max(current.y - (box.y + box.h), box.y - (current.y + current.h)))
-                    
-                    if dx < horizontalThreshold && dy < verticalThreshold {
-                        currentCluster.append(box)
-                        toProcess.append(box)
-                    } else {
-                        newUnvisited.append(box)
+        if uniqueAnchors.count > 1 {
+            // Avem mai multe bonuri sigure! Aplicam Voronoi clustering cu penalizare orizontala
+            var groups: [[OCRBoxItem]] = Array(repeating: [], count: uniqueAnchors.count)
+            for box in boxes {
+                var bestDist: CGFloat = .infinity
+                var bestIdx = 0
+                for (i, anchor) in uniqueAnchors.enumerated() {
+                    let dx = abs(box.x - anchor.x)
+                    let dy = abs(box.y - anchor.y)
+                    // Un bon e vertical. Distanta orizontala o penalizam de 10 ori mai mult
+                    let dist = dx * 10.0 + dy
+                    if dist < bestDist {
+                        bestDist = dist
+                        bestIdx = i
                     }
                 }
-                unvisited = newUnvisited
+                groups[bestIdx].append(box)
             }
-            // Sortam de sus in jos, stanga la dreapta
-            currentCluster.sort { 
-                if abs($0.y - $1.y) < medianHeight { return $0.x < $1.x }
-                return $0.y < $1.y 
-            }
-            clusters.append(currentCluster)
+            clusters = groups
+        } else {
+            // 2. Fallback: XY-Cut
+            clusters = recursiveXYCut(boxes, medianHeight: medianHeight)
         }
         
         // Excludem gunoaiele (clustere cu doar 1-2 linii de text)
-        let validClusters = clusters.filter { $0.count >= 3 }
-        // Daca nu ramane nimic, le intoarcem pe toate ca un singur document (fallback)
-        if validClusters.isEmpty { return [boxes] }
+        clusters = clusters.filter { $0.count >= 3 }
+        if clusters.isEmpty { return [boxes] }
         
-        // Sortam clusterele de la stanga la dreapta (cum stau bonurile pe masa)
-        return validClusters.sorted { $0[0].x < $1[0].x }
+        // Sortam clusterele (de sus in jos, stanga la dreapta)
+        return clusters.sorted {
+            if abs($0[0].y - $1[0].y) < medianHeight * 5.0 {
+                return $0[0].x < $1[0].x
+            }
+            return $0[0].y < $1[0].y
+        }
+    }
+    
+    private func recursiveXYCut(_ boxes: [OCRBoxItem], medianHeight: CGFloat) -> [[OCRBoxItem]] {
+        guard boxes.count > 1 else { return [boxes] }
+        
+        // 1. Tăietură pe X (cautam o coloana complet goala intre bonuri)
+        let sortedX = boxes.sorted { $0.x < $1.x }
+        var xIntervals: [(min: CGFloat, max: CGFloat)] = []
+        
+        for b in sortedX {
+            if xIntervals.isEmpty {
+                xIntervals.append((b.x, b.x + b.w))
+            } else {
+                let lastIdx = xIntervals.count - 1
+                // Permitem o toleranță (daca un text centrat acopera gaura, intervalele se unesc)
+                if b.x <= xIntervals[lastIdx].max + medianHeight * 2.5 {
+                    xIntervals[lastIdx].max = max(xIntervals[lastIdx].max, b.x + b.w)
+                } else {
+                    xIntervals.append((b.x, b.x + b.w))
+                }
+            }
+        }
+        
+        if xIntervals.count > 1 {
+            var groups: [[OCRBoxItem]] = Array(repeating: [], count: xIntervals.count)
+            for b in boxes {
+                for (i, interval) in xIntervals.enumerated() {
+                    if b.x >= interval.min - medianHeight && (b.x + b.w) <= interval.max + medianHeight {
+                        groups[i].append(b)
+                        break
+                    }
+                }
+            }
+            let validGroups = groups.filter { !$0.isEmpty }
+            if validGroups.count > 1 {
+                return validGroups.flatMap { recursiveXYCut($0, medianHeight: medianHeight) }
+            }
+        }
+        
+        // 2. Tăietură pe Y (cautam un rand complet gol intre bonuri, pe verticala)
+        let sortedY = boxes.sorted { $0.y < $1.y }
+        var yIntervals: [(min: CGFloat, max: CGFloat)] = []
+        
+        for b in sortedY {
+            if yIntervals.isEmpty {
+                yIntervals.append((b.y, b.y + b.h))
+            } else {
+                let lastIdx = yIntervals.count - 1
+                if b.y <= yIntervals[lastIdx].max + medianHeight * 3.5 {
+                    yIntervals[lastIdx].max = max(yIntervals[lastIdx].max, b.y + b.h)
+                } else {
+                    yIntervals.append((b.y, b.y + b.h))
+                }
+            }
+        }
+        
+        if yIntervals.count > 1 {
+            var groups: [[OCRBoxItem]] = Array(repeating: [], count: yIntervals.count)
+            for b in boxes {
+                for (i, interval) in yIntervals.enumerated() {
+                    if b.y >= interval.min - medianHeight && (b.y + b.h) <= interval.max + medianHeight {
+                        groups[i].append(b)
+                        break
+                    }
+                }
+            }
+            let validGroups = groups.filter { !$0.isEmpty }
+            if validGroups.count > 1 {
+                return validGroups.flatMap { recursiveXYCut($0, medianHeight: medianHeight) }
+            }
+        }
+        
+        return [boxes]
     }
 }
 

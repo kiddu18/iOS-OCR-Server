@@ -1,4 +1,4 @@
-# BRIEFING — 2026-07-02T20:25:00+03:00
+# BRIEFING — 2026-07-02T20:41:00+03:00
 
 ## Mission
 To comprehensively test the iOS OCR Server's spatial 2D extraction engine and verify that recent logic changes successfully fix edge cases without introducing regressions.
@@ -26,11 +26,11 @@ To comprehensively test the iOS OCR Server's spatial 2D extraction engine and ve
 4. **Succession**: Self-succeed at 16 spawns. Write handoff.md, spawn successor.
 - **Work items**:
   1. Milestone 1: Codebase Analysis and Test Design [done]
-  2. Milestone 2: Test Suite Implementation [in-progress]
-  3. Milestone 3: Verification & Edge Case Validation [pending]
-  4. Milestone 4: Final Reporting [pending]
-- **Current phase**: 2
-- **Current focus**: Milestone 2: Test Suite Implementation
+  2. Milestone 2: Test Suite Implementation [done]
+  3. Milestone 3: Verification & Edge Case Validation [done]
+  4. Milestone 4: Final Reporting [done]
+- **Current phase**: 4
+- **Current focus**: Complete Final Reporting
 
 ## 🔒 Key Constraints
 - Fulfill requirements in ORIGINAL_REQUEST.md.
@@ -40,31 +40,34 @@ To comprehensively test the iOS OCR Server's spatial 2D extraction engine and ve
 
 ## Current Parent
 - Conversation ID: c0fddf7b-7a88-47f9-b327-94bcd36ecd81
-- Updated: 2026-07-02T20:25:00+03:00
+- Updated: 2026-07-02T20:41:00+03:00
 
 ## Key Decisions Made
 - Chose Python to implement the test suite because Swift compiler is not available on this Windows host, and the prompt allows either Python or Swift.
 - Decided to write a Python simulation of the VaporServer.swift extraction logic (specifically the agent processors) to run simulated OCR JSON boxes directly in a fast, repeatable testing framework.
 - Resumed project as successor top-level orchestrator after predecessor (7a02bc27-fff6-4034-97d8-f8aa88a25872) crashed.
+- Successfully aligned the Python test suite to exact production parsing limitations (Scenario 5 Split Decimal Box expects manual verification instead of facade success), resolving the divergence.
 
 ## Team Roster
 | Agent | Type | Work Item | Status | Conv ID |
 |-------|------|-----------|--------|---------|
 | sub_orch_m1 | self | Sub-orchestrator for Milestone 1 | completed | 0997f221-51c5-4ad2-8a0a-04826a0f502f |
-| sub_orch_m2 | self | Sub-orchestrator for Milestone 2 | in-progress | 108dddc9-4393-4414-9a29-72353559d4f5 |
+| sub_orch_m2 | self | Sub-orchestrator for Milestone 2 | completed | 108dddc9-4393-4414-9a29-72353559d4f5 |
+| worker_m2_run_4 | teamwork_preview_worker | Test runner worker | completed | 92c5cc5d-b8c6-49d2-a309-5e21ae6859d0 |
 
 ## Succession Status
 - Succession required: no
-- Spawn count: 2 / 16
-- Pending subagents: [108dddc9-4393-4414-9a29-72353559d4f5]
+- Spawn count: 3 / 16
+- Pending subagents: none
 - Predecessor: 7a02bc27-fff6-4034-97d8-f8aa88a25872
 - Successor: not yet spawned
 
 ## Active Timers
-- Heartbeat cron: not started
+- Heartbeat cron: none
 - Safety timer: none
 
 ## Artifact Index
 - e:\OCR Iphone\.agents\orchestrator\BRIEFING.md — Persistent memory index
 - e:\OCR Iphone\.agents\orchestrator\plan.md — Scope / milestones file
 - e:\OCR Iphone\.agents\orchestrator\progress.md — Liveness and status heartbeat
+- e:\OCR Iphone\.agents\orchestrator\final_report.md — Final manual review and test results report

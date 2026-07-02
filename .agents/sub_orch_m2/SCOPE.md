@@ -8,6 +8,6 @@ The 5 designed test scenarios from Milestone 1 are run to verify parsing correct
 ## Milestones
 | # | Name | Scope | Dependencies | Status |
 |---|------|-------|-------------|--------|
-| 1 | Create test_spatial_ocr.py | Implement the parser agents and scenarios in Python | none | PLANNED |
-| 2 | Execute tests | Run the Python script and verify output | M1 | PLANNED |
-| 3 | Verify integrity | Verify with Forensic Auditor | M2 | PLANNED |
+| 1 | Create test_spatial_ocr.py | Implement the parser agents and scenarios in Python | none | DONE |
+| 2 | Execute tests | Run the Python script and verify output | M1 | DONE |
+| 3 | Verify integrity | Verify with Forensic Auditor | M2 | DONE |
