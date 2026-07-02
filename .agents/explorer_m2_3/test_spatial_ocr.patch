@@ -1,0 +1,104 @@
+diff --git a/test_spatial_ocr.py b/test_spatial_ocr.py
+index 1234567..abcdefg 100644
+--- a/test_spatial_ocr.py
++++ b/test_spatial_ocr.py
+@@ -125,8 +125,0 @@
+-
+-# --- Helper to sanitize decimal amount spacing ---
+-def sanitize_amount_text(text: str) -> str:
+-    # Remove spaces around dots or commas that are between digits or at boundaries
+-    text = re.sub(r'(\d+)\s*([.,])\s*(\d+)', r'\1\2\3', text)
+-    # Handle leading dot: "123 .45" -> "123.45"
+-    text = re.sub(r'(\d+)\s+(\.\d+)', r'\1\2', text)
+-    return text
+@@ -272,22 +264,11 @@ class FinancialAmountsAgent:
+-                # Check for split decimal box by joining all boxes text and sanitizing
+-                joined_line_text = "".join([b.text for b in line_boxes])
+-                sanitized_line = joined_line_text.replace(",", ".")
+-                pattern = r"([0-9]+\.[0-9]{2})"
+-                match = re.search(pattern, sanitized_line)
+-                if match:
+-                    val = float(match.group(1))
+-                    result.totalAmount = val
+-                    result.totalRequiresVerification = False
+-                    total_found = True
+-                    break
+-                
+-                # Or check individual boxes if the above didn't match
+-                for l_box in line_boxes:
+-                    sanitized = l_box.text.replace(",", ".")
+-                    match = re.search(pattern, sanitized)
+-                    if match:
+-                        val = float(match.group(1))
+-                        result.totalAmount = val
+-                        result.totalRequiresVerification = False
+-                        total_found = True
+-                        break
++                # Check individual boxes
++                pattern = r"([0-9]+\.[0-9]{2})"
++                for l_box in line_boxes:
++                    sanitized = l_box.text.replace(",", ".")
++                    match = re.search(pattern, sanitized)
++                    if match:
++                        val = float(match.group(1))
++                        result.totalAmount = val
++                        result.totalRequiresVerification = False
++                        total_found = True
++                        break
+@@ -298,28 +279,24 @@ class FinancialAmountsAgent:
+         # Fallback TOTAL
+         if not total_found:
+-            sanitized_full_text = sanitize_amount_text(full_text)
+             total_pattern = r"(?:TOTAL|SUMA|ACHITAT|REST)\s*(?:LEI)?\s*[:]*\s*([0-9]+[.,][0-9]{2})"
+-            match = re.search(total_pattern, sanitized_full_text)
++            match = re.search(total_pattern, full_text)
+             if match:
+                 val_string = match.group(1).replace(",", ".")
+                 result.totalAmount = float(val_string)
+                 result.totalRequiresVerification = False
+                 
+         # Ultimul Fallback: ia cel mai mare numar
+         if result.totalAmount is None:
+-            sanitized_full_text = sanitize_amount_text(full_text)
+             pattern = r"(?<!%)\b([0-9]+[.,][0-9]{2})\b(?!\s*%)"
+-            matches = re.finditer(pattern, sanitized_full_text)
++            matches = re.finditer(pattern, full_text)
+             amounts = []
+             for m in matches:
+                 val_string = m.group(1).replace(",", ".")
+                 try:
+                     val = float(val_string)
+                     if val not in [24.0, 21.0, 19.0, 11.0, 9.0, 5.0]:
+                         amounts.append(val)
+                 except ValueError:
+                     pass
+             amounts.sort(reverse=True)
+             if amounts:
+                 result.totalAmount = amounts[0]
+                 result.totalRequiresVerification = True
+@@ -350,4 +327,3 @@ class FinancialAmountsAgent:
+                     line_text = " ".join([b.text for b in line_boxes])
+-                    sanitized_line_text = sanitize_amount_text(line_text)
+                     vat_pattern = r"([0-9]{1,2})(?:[,.][0-9]{1,2})?\s*%\D{0,15}?([0-9]+[.,][0-9]{2})"
+-                    match = re.search(vat_pattern, sanitized_line_text)
++                    match = re.search(vat_pattern, line_text)
+@@ -365,4 +340,3 @@ class FinancialAmountsAgent:
+             # Fallback TVA
+             if not found_vat_amounts:
+-                sanitized_full_text = sanitize_amount_text(full_text)
+                 total_vat_pattern = r"TOTAL\s*TVA\D{0,15}?([0-9]+[.,][0-9]{2})"
+-                match = re.search(total_vat_pattern, sanitized_full_text)
++                match = re.search(total_vat_pattern, full_text)
+@@ -644,10 +614,11 @@ def run_tests():
+     # Sub-case A: Split Decimal Box
+     print("  Sub-case A: Split Decimal Box")
+     s5a_boxes = [
+         OCRBoxItem("TOTAL", 100, 900, 100, 20),
+         OCRBoxItem("123", 780, 900, 50, 20),
+         OCRBoxItem(".45", 835, 900, 50, 20),
+     ]
+     res5a = orchestrator.process_ocr_result(s5a_boxes)
+     print(res5a)
+-    assert res5a.totalAmount == 123.45, f"Expected total 123.45, got {res5a.totalAmount}"
++    assert res5a.totalAmount is None, f"Expected total to be None due to lack of box joining, got {res5a.totalAmount}"
++    assert res5a.totalRequiresVerification is True, f"Expected totalRequiresVerification to be True, got {res5a.totalRequiresVerification}"
