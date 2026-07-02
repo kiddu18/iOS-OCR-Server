@@ -8,7 +8,7 @@
 import Vapor
 import Vision
 
-struct OCRRectItem: Content {
+public struct OCRRectItem: Content {
     let topLeft_x: Double
     let topLeft_y: Double
     let topRight_x: Double
@@ -19,7 +19,7 @@ struct OCRRectItem: Content {
     let bottomRight_y: Double
 }
 
-struct OCRBoxItem: Content {
+public struct OCRBoxItem: Content {
     let text: String
     let x: Double
     let y: Double
@@ -436,8 +436,8 @@ actor VaporServer {
             }
 
             // 取得 actor 內的參數（需 await）
-            let usesLanguageCorrection = await self.usesLanguageCorrection
-            let automaticallyDetectsLanguage = await self.automaticallyDetectsLanguage
+            _ = await self.usesLanguageCorrection
+            _ = await self.automaticallyDetectsLanguage
 
             // ByteBuffer -> Data
             let data = Self.byteBufferToData(upload.file.data)
