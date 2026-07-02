@@ -656,8 +656,8 @@ class CuiExtractorAgent: AccountingAgent {
         for keywordBox in candidateBoxes {
             let nearbyBoxes = boxes.filter {
                 ($0.x != keywordBox.x || $0.y != keywordBox.y) && // exclude self
-                $0.y >= keywordBox.y - 15 && $0.y <= keywordBox.y + 40 &&
-                $0.x >= keywordBox.x - 20
+                $0.y >= keywordBox.y - keywordBox.h * 0.8 && $0.y <= keywordBox.y + keywordBox.h * 2.0 &&
+                $0.x >= keywordBox.x - keywordBox.w * 0.5
             }.sorted { $0.x < $1.x }
             
             for nb in nearbyBoxes {
@@ -787,13 +787,19 @@ class FinancialAmountsAgent: AccountingAgent {
         
         for box in boxes {
             let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
-            if totalKeywords.contains(where: { cleanText.isFuzzyMatch($0, tolerance: 1) }) {
+            if totalKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
                 // Cauta numere pe aceeasi linie (axa Y similara), la dreapta
+                let yTol = max(box.h * 0.6, 15.0)
                 let lineBoxes = boxes.filter {
                     ($0.x != box.x || $0.y != box.y) &&
-                    abs($0.y - box.y) < 20 &&
-                    $0.x > box.x - 20
+                    abs($0.y - box.y) < yTol &&
+                    $0.x > box.x - box.w * 0.5
                 }.sorted { $0.x < $1.x }
+                
+                let lineTextForCheck = lineBoxes.map { $0.text.uppercased() }.joined(separator: " ")
+                if lineTextForCheck.contains("TVA") {
+                    continue // Ignoram liniile "TOTAL TVA"
+                }
                 
                 for lBox in lineBoxes {
                     let sanitized = lBox.text.replacingOccurrences(of: ",", with: ".")
@@ -815,7 +821,7 @@ class FinancialAmountsAgent: AccountingAgent {
         
         // Fallback TOTAL
         if !totalFound {
-            let totalPattern = "(?:TOTAL|SUMA|ACHITAT|REST)\\s*[:]*\\s*([0-9]+[.,][0-9]{2})"
+            let totalPattern = "(?:TOTAL|SUMA|ACHITAT|REST)\\s*(?:LEI)?\\s*[:]*\\s*([0-9]+[.,][0-9]{2})"
             if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
                let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
                 let matchedString = (fullText as NSString).substring(with: match.range(at: 1))
@@ -862,10 +868,11 @@ class FinancialAmountsAgent: AccountingAgent {
             for box in boxes {
                 let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
                 if cleanText.isFuzzyMatch("TVA", tolerance: 1) || cleanText.contains("TVA") {
+                    let yTol = max(box.h * 0.6, 15.0)
                     let lineBoxes = boxes.filter {
                         ($0.x != box.x || $0.y != box.y) &&
-                        abs($0.y - box.y) < 20 &&
-                        $0.x > box.x - 20
+                        abs($0.y - box.y) < yTol &&
+                        $0.x > box.x - box.w * 0.5
                     }.sorted { $0.x < $1.x }
                     
                     let lineText = lineBoxes.map { $0.text }.joined(separator: " ")
