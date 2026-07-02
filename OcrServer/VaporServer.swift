@@ -646,6 +646,8 @@ class CuiExtractorAgent: AccountingAgent {
                 result.cui = numbersOnly
                 result.cuiRequiresVerification = false
                 await verifyWithANAF(cui: numbersOnly, result: &result)
+                // Restabilim CUI-ul chiar daca ANAF zice fals (ANAF poate da timeout/eroare), noi am extras bine din poza
+                result.cui = numbersOnly 
                 return
             }
         }
@@ -665,6 +667,7 @@ class CuiExtractorAgent: AccountingAgent {
                     result.cui = numbersOnly
                     result.cuiRequiresVerification = false
                     await verifyWithANAF(cui: numbersOnly, result: &result)
+                    result.cui = numbersOnly
                     return
                 }
             }
@@ -684,6 +687,7 @@ class CuiExtractorAgent: AccountingAgent {
                         result.cui = cuiCandidate
                         result.cuiRequiresVerification = false
                         await verifyWithANAF(cui: cuiCandidate, result: &result)
+                        result.cui = cuiCandidate
                         return
                     }
                 }
@@ -767,6 +771,7 @@ class CuiExtractorAgent: AccountingAgent {
                 result.cuiRequiresVerification = true
             }
         } catch {
+            // Nu stergem CUI-ul, doar marcam
             result.cuiRequiresVerification = true
         }
     }
@@ -864,7 +869,7 @@ class FinancialAmountsAgent: AccountingAgent {
                     }.sorted { $0.x < $1.x }
                     
                     let lineText = lineBoxes.map { $0.text }.joined(separator: " ")
-                    let vatPattern = "([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*%[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
+                    let vatPattern = "([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*[%][^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
                     
                     if let regex = try? NSRegularExpression(pattern: vatPattern, options: []) {
                         let nsString = lineText as NSString
