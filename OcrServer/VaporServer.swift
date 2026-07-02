@@ -341,8 +341,8 @@ actor VaporServer {
                 let clusters = AccountingOrchestrator.shared.clusterBoxes(boxes)
                 
                 for cluster in clusters {
-                    let clusterResult = await AccountingOrchestrator.shared.processOcrResult(boxes: cluster, buyerCui: upload.buyer_cui)
-                    accountingDataArray.append(clusterResult)
+                    let clusterResults = await AccountingOrchestrator.shared.processOcrResult(boxes: cluster, buyerCui: upload.buyer_cui)
+                    accountingDataArray.append(contentsOf: clusterResults)
                 }
                 
                 // Pentru compatibilitate backward, primul element e in accountingData
@@ -529,6 +529,12 @@ extension Notification.Name {
 
 // MARK: - Accounting Extraction (Contabilitate)
 
+public struct VatBreakdown: Content {
+    public var percentage: String
+    public var vatAmount: Double
+    public var baseAmount: Double
+}
+
 public struct AccountingResult: Content {
     public var documentType: String?
     public var documentTypeRequiresVerification: Bool = true
@@ -552,6 +558,8 @@ public struct AccountingResult: Content {
     public var vatPercentages: String?
     
     public var baseAmount: Double?
+    
+    public var vatBreakdowns: [VatBreakdown]?
     
     public var fiscalWarnings: [String] = []
     
@@ -906,6 +914,18 @@ class FinancialAmountsAgent: AccountingAgent {
             }
             
             if !foundVatAmounts.isEmpty {
+                var breakdowns: [VatBreakdown] = []
+                for i in 0..<foundVatAmounts.count {
+                    let pctStr = foundVatPercentages[i].replacingOccurrences(of: "%", with: "")
+                    let pct = Double(pctStr) ?? 19.0
+                    let val = foundVatAmounts[i]
+                    // Daca e Mixt, calculul nu se poate face doar din TVA, dar e fallback.
+                    let base = pct > 0 ? (val * 100.0) / pct : (result.totalAmount ?? val)
+                    let roundedBase = (base * 100).rounded() / 100
+                    breakdowns.append(VatBreakdown(percentage: foundVatPercentages[i], vatAmount: val, baseAmount: roundedBase))
+                }
+                result.vatBreakdowns = breakdowns
+                
                 let sumVat = foundVatAmounts.reduce(0, +)
                 result.vatAmount = (sumVat * 100).rounded() / 100
                 result.vatPercentages = Array(Set(foundVatPercentages)).joined(separator: ", ")
@@ -998,7 +1018,7 @@ class FiscalComplianceAgent: AccountingAgent {
 public class AccountingOrchestrator {
     public static let shared = AccountingOrchestrator()
     
-    public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil) async -> AccountingResult {
+    public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil) async -> [AccountingResult] {
         // Generate textBlocks (grouped by lines) for legacy regex usage
         var textBlocks: [String] = []
         let sortedByY = boxes.sorted { $0.y < $1.y }
@@ -1038,7 +1058,27 @@ public class AccountingOrchestrator {
         for agent in agents {
             await agent.process(textBlocks: textBlocks, boxes: boxes, result: &result)
         }
-        return result
+        
+        // --- SPLIT LOGIC ---
+        // Daca utilizatorul are mai multe cote TVA (sau doar una explicita din breakdown), 
+        // dorim sa generam un rand separat pentru fiecare.
+        if let breakdowns = result.vatBreakdowns, breakdowns.count > 0 {
+            var splitResults: [AccountingResult] = []
+            for b in breakdowns {
+                var splitCopy = result
+                splitCopy.vatPercentages = b.percentage
+                splitCopy.vatAmount = b.vatAmount
+                splitCopy.baseAmount = b.baseAmount
+                // Setam totalul per rand ca suma dintre Baza aferenta si TVA-ul aferent.
+                splitCopy.totalAmount = ((b.baseAmount + b.vatAmount) * 100).rounded() / 100
+                // Curatam vectorul intern
+                splitCopy.vatBreakdowns = nil
+                splitResults.append(splitCopy)
+            }
+            return splitResults
+        }
+        
+        return [result]
     }
     
     // Separa cutiile de text in documente distincte
