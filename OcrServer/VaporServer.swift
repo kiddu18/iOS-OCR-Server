@@ -1088,26 +1088,55 @@ public class AccountingOrchestrator {
         let sortedHeights = boxes.map { $0.h }.sorted()
         let medianHeight = sortedHeights[sortedHeights.count / 2]
         
-        // 1. Anchor-based clustering (bazat pe CUI/CIF)
-        let cuiPattern = "(?i)(?:CUI|CIF|FISCAL|C\\.I\\.F|C\\.F|RO)\\s*[:.]?\\s*(?:RO)?\\s*([0-9]{2,10})"
-        var anchors: [OCRBoxItem] = []
+        // 1. Anchor-based clustering (bazat pe CUI/CIF Vânzător)
+        let cuiPattern = "(?i)(?:CUI|CIF|FISCAL|C\\.I\\.F|C\\.F)\\s*[:.]?\\s*(?:RO)?\\s*([0-9]{5,10})"
+        var extractedAnchors: [(box: OCRBoxItem, cuiStr: String)] = []
         if let regex = try? NSRegularExpression(pattern: cuiPattern, options: []) {
             for box in boxes {
-                let text = box.text.uppercased().replacingOccurrences(of: " ", with: "")
-                if regex.firstMatch(in: text, options: [], range: NSRange(location: 0, length: text.utf16.count)) != nil {
-                    anchors.append(box)
+                let text = box.text.uppercased()
+                let cleanText = text.replacingOccurrences(of: " ", with: "")
+                
+                // Excludem CUI-urile de client
+                if text.contains("CLIENT") || text.contains("CUMP") || text.contains("BENEF") || text.contains("CNP") || text.contains("C.N.P") {
+                    continue
+                }
+                
+                let range = NSRange(location: 0, length: cleanText.utf16.count)
+                if let match = regex.firstMatch(in: cleanText, options: [], range: range) {
+                    if match.numberOfRanges > 1 {
+                        let nsStr = cleanText as NSString
+                        let cuiStr = nsStr.substring(with: match.range(at: 1))
+                        extractedAnchors.append((box, cuiStr))
+                    }
                 }
             }
         }
         
-        // Filtram ancorele prea apropiate (ca sa nu avem 2 ancore pe acelasi bon, ex: COD FISCAL si RO...)
+        // Filtram ancorele pentru a pastra doar UNA per bon fizic
         var uniqueAnchors: [OCRBoxItem] = []
-        for a in anchors {
-            let isTooClose = uniqueAnchors.contains { u in
-                abs(u.x - a.x) < medianHeight * 10.0 && abs(u.y - a.y) < medianHeight * 15.0
+        var uniqueCuis: [String] = []
+        for a in extractedAnchors {
+            var isDuplicate = false
+            for i in 0..<uniqueAnchors.count {
+                let u = uniqueAnchors[i]
+                let uCui = uniqueCuis[i]
+                let dx = abs(u.x - a.box.x)
+                let dy = abs(u.y - a.box.y)
+                
+                // Daca e acelasi CUI si e in aceeasi coloana (acelasi bon fizic)
+                if uCui == a.cuiStr && dx < medianHeight * 10.0 {
+                    isDuplicate = true
+                    break
+                }
+                // Daca sunt prea aproape fizic (evitam dubla potrivire pe acelasi bloc de text)
+                if dx < medianHeight * 10.0 && dy < medianHeight * 15.0 {
+                    isDuplicate = true
+                    break
+                }
             }
-            if !isTooClose {
-                uniqueAnchors.append(a)
+            if !isDuplicate {
+                uniqueAnchors.append(a.box)
+                uniqueCuis.append(a.cuiStr)
             }
         }
         
