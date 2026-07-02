@@ -341,33 +341,7 @@ actor VaporServer {
                 let clusters = AccountingOrchestrator.shared.clusterBoxes(boxes)
                 
                 for cluster in clusters {
-                    // Grupam cutiile pe linii folosind axa Y
-                    let sortedByY = cluster.sorted { $0.y < $1.y }
-                    var lines: [[OCRBoxItem]] = []
-                    if !sortedByY.isEmpty {
-                        var currentLine = [sortedByY[0]]
-                        let sortedHeights = sortedByY.map { $0.h }.sorted()
-                        let medianHeight = sortedHeights[sortedHeights.count / 2]
-                        let yTolerance = medianHeight * 0.4
-                        
-                        for box in sortedByY.dropFirst() {
-                            if abs(box.y - currentLine[0].y) < yTolerance {
-                                currentLine.append(box)
-                            } else {
-                                lines.append(currentLine)
-                                currentLine = [box]
-                            }
-                        }
-                        lines.append(currentLine)
-                    }
-                    
-                    // Sortam fiecare linie de la stanga la dreapta si unim textul
-                    let texts = lines.map { line -> String in
-                        let sortedLine = line.sorted { $0.x < $1.x }
-                        return sortedLine.map { $0.text }.joined(separator: " ")
-                    }
-                    
-                    let clusterResult = await AccountingOrchestrator.shared.processOcrResult(textBlocks: texts, buyerCui: upload.buyer_cui)
+                    let clusterResult = await AccountingOrchestrator.shared.processOcrResult(boxes: cluster, buyerCui: upload.buyer_cui)
                     accountingDataArray.append(clusterResult)
                 }
                 
@@ -587,11 +561,11 @@ public struct AccountingResult: Content {
 }
 
 protocol AccountingAgent {
-    func process(textBlocks: [String], result: inout AccountingResult) async
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async
 }
 
 class DocumentClassificationAgent: AccountingAgent {
-    func process(textBlocks: [String], result: inout AccountingResult) async {
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: " ").uppercased()
         
         let hasPOS = fullText.contains("TERMINAL ID") || fullText.contains("PIN VERIFICAT") || fullText.contains("TRANZACTIE ACCEPTATA") || fullText.contains("TRANZACTIE APROBATA") || fullText.contains("POS")
@@ -619,7 +593,7 @@ class DocumentClassificationAgent: AccountingAgent {
 }
 
 class DocumentDetailsAgent: AccountingAgent {
-    func process(textBlocks: [String], result: inout AccountingResult) async {
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: "\n").uppercased()
         
         let seriesPattern = "(?:SERIA|SERIE|SERIA:|CHITANTA\\s*SERIA)\\s*([A-Z]{1,5})"
@@ -652,28 +626,52 @@ class DocumentDetailsAgent: AccountingAgent {
 }
 
 class CuiExtractorAgent: AccountingAgent {
-    func process(textBlocks: [String], result: inout AccountingResult) async {
-        let fullText = textBlocks.joined(separator: " ").uppercased()
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
+        // 1. Cautare Spatiala Inteligenta 2D (Fuzzy)
+        let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "RO"]
+        var candidateBoxes: [OCRBoxItem] = []
         
-        // Cautam mai intai cu prefix explicit (CIF, CUI, COD FISCAL, RO) pentru a evita alarme false
-        let primaryPattern = "(?:C\\.?U\\.?I\\.?|C\\.?I\\.?F\\.?|COD FISCAL|RO|R0)?[\\s\\.:\\-]*([0-9]{2,10})"
-        if let regex = try? NSRegularExpression(pattern: primaryPattern, options: []) {
-            let nsString = fullText as NSString
-            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
-            for match in results {
-                if match.numberOfRanges > 1 {
-                    let cuiCandidate = nsString.substring(with: match.range(at: 1))
-                    if isValidCUI(cui: cuiCandidate) {
-                        result.cui = cuiCandidate
-                        result.cuiRequiresVerification = false
-                        await verifyWithANAF(cui: cuiCandidate, result: &result)
-                        return
-                    }
+        for box in boxes {
+            let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
+            if cuiKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
+                candidateBoxes.append(box)
+            }
+        }
+        
+        // Verificam textul din interiorul cutiilor gasite (poate CUI-ul e in aceeasi cutie: "CIF RO123456")
+        for box in candidateBoxes {
+            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+            let numbersOnly = text.filter { $0.isNumber }
+            if isValidCUI(cui: numbersOnly) {
+                result.cui = numbersOnly
+                result.cuiRequiresVerification = false
+                await verifyWithANAF(cui: numbersOnly, result: &result)
+                return
+            }
+        }
+        
+        // Cautam cutii la dreapta sau putin mai jos
+        for keywordBox in candidateBoxes {
+            let nearbyBoxes = boxes.filter {
+                ($0.x != keywordBox.x || $0.y != keywordBox.y) && // exclude self
+                $0.y >= keywordBox.y - 15 && $0.y <= keywordBox.y + 40 &&
+                $0.x >= keywordBox.x - 20
+            }.sorted { $0.x < $1.x }
+            
+            for nb in nearbyBoxes {
+                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+                let numbersOnly = text.filter { $0.isNumber }
+                if !numbersOnly.isEmpty && isValidCUI(cui: numbersOnly) {
+                    result.cui = numbersOnly
+                    result.cuiRequiresVerification = false
+                    await verifyWithANAF(cui: numbersOnly, result: &result)
+                    return
                 }
             }
         }
         
-        // Daca nu am gasit cu prefix, incercam orice numar care trece testul de validare CUI
+        // 2. Fallback la Regex-ul clasic (daca geometria a esuat sau OCR-ul a unit totul aiurea)
+        let fullText = textBlocks.joined(separator: " ").uppercased()
         let fallbackPattern = "\\b([0-9]{2,10})\\b"
         if let regex = try? NSRegularExpression(pattern: fallbackPattern, options: []) {
             let nsString = fullText as NSString
@@ -682,7 +680,6 @@ class CuiExtractorAgent: AccountingAgent {
             for match in results {
                 if match.numberOfRanges > 1 {
                     let cuiCandidate = nsString.substring(with: match.range(at: 1))
-        
                     if isValidCUI(cui: cuiCandidate) {
                         result.cui = cuiCandidate
                         result.cuiRequiresVerification = false
@@ -776,23 +773,55 @@ class CuiExtractorAgent: AccountingAgent {
 }
 
 class FinancialAmountsAgent: AccountingAgent {
-    func process(textBlocks: [String], result: inout AccountingResult) async {
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: "\n").uppercased()
         
-        // Pas 1: Cauta explicitly TOTAL, SUMA, ACHITAT
-        let totalPattern = "(?:TOTAL|SUMA|ACHITAT|REST)\\s*[:]*\\s*([0-9]+[.,][0-9]{2})"
-        if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
-           let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
-            let nsString = fullText as NSString
-            let matchedString = nsString.substring(with: match.range(at: 1))
-            let sanitized = matchedString.replacingOccurrences(of: ",", with: ".")
-            if let val = Double(sanitized) {
-                result.totalAmount = val
-                result.totalRequiresVerification = false
+        // --- SPATIAL TOTAL EXTRACTION ---
+        let totalKeywords = ["TOTAL", "SUMA", "ACHITAT"]
+        var totalFound = false
+        
+        for box in boxes {
+            let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
+            if totalKeywords.contains(where: { cleanText.isFuzzyMatch($0, tolerance: 1) }) {
+                // Cauta numere pe aceeasi linie (axa Y similara), la dreapta
+                let lineBoxes = boxes.filter {
+                    ($0.x != box.x || $0.y != box.y) &&
+                    abs($0.y - box.y) < 20 &&
+                    $0.x > box.x - 20
+                }.sorted { $0.x < $1.x }
+                
+                for lBox in lineBoxes {
+                    let sanitized = lBox.text.replacingOccurrences(of: ",", with: ".")
+                    let pattern = "([0-9]+[.][0-9]{2})"
+                    if let regex = try? NSRegularExpression(pattern: pattern, options: []),
+                       let match = regex.firstMatch(in: sanitized, options: [], range: NSRange(location: 0, length: sanitized.utf16.count)) {
+                        let matchedString = (sanitized as NSString).substring(with: match.range(at: 1))
+                        if let val = Double(matchedString) {
+                            result.totalAmount = val
+                            result.totalRequiresVerification = false
+                            totalFound = true
+                            break
+                        }
+                    }
+                }
+            }
+            if totalFound { break }
+        }
+        
+        // Fallback TOTAL
+        if !totalFound {
+            let totalPattern = "(?:TOTAL|SUMA|ACHITAT|REST)\\s*[:]*\\s*([0-9]+[.,][0-9]{2})"
+            if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
+               let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
+                let matchedString = (fullText as NSString).substring(with: match.range(at: 1))
+                if let val = Double(matchedString.replacingOccurrences(of: ",", with: ".")) {
+                    result.totalAmount = val
+                    result.totalRequiresVerification = false
+                }
             }
         }
         
-        // Daca nu gaseste TOTAL explicit, ia cel mai mare numar care NU pare a fi un procentaj
+        // Ultimul Fallback: ia cel mai mare numar
         if result.totalAmount == nil {
             let pattern = "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)"
             if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
@@ -800,16 +829,15 @@ class FinancialAmountsAgent: AccountingAgent {
                 let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
                 var amounts: [Double] = []
                 for match in results {
-                    let matchedString = nsString.substring(with: match.range(at: 1))
-                    let sanitized = matchedString.replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(sanitized), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00 {
+                    let matchedString = nsString.substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+                    if let val = Double(matchedString), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00 {
                         amounts.append(val)
                     }
                 }
                 amounts.sort(by: >)
                 if !amounts.isEmpty {
                     result.totalAmount = amounts[0]
-                    result.totalRequiresVerification = true // Nu am gasit "TOTAL", deci cere verificare
+                    result.totalRequiresVerification = true
                 }
             }
         }
@@ -817,55 +845,57 @@ class FinancialAmountsAgent: AccountingAgent {
         let isReceipt = result.documentType == "Chitanță POS" || result.documentType == "Chitanță de mână"
         
         if isReceipt {
-            // Chitantele sunt doar dovezi de plata, nu contin TVA deductibil in mod direct.
             result.vatAmount = 0
             result.vatPercentages = "-"
             result.baseAmount = result.totalAmount
             result.vatRequiresVerification = false
         } else {
-            // Pas 2: Extragere TVA per cote
-            // Cauta: TVA A 24,00% 0,65 sau TVA 19% 10.50 (optional cu zecimale la cota)
-            let vatPattern = "TVA\\s*(?:[A-Z]\\s*)?([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*%?[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
+            // --- SPATIAL TVA EXTRACTION ---
             var foundVatAmounts: [Double] = []
             var foundVatPercentages: [String] = []
             
-            if let regex = try? NSRegularExpression(pattern: vatPattern, options: []) {
-                let nsString = fullText as NSString
-                let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
-                
-                for match in results {
-                    if match.numberOfRanges > 2 {
-                        let pctString = nsString.substring(with: match.range(at: 1))
-                        let valString = nsString.substring(with: match.range(at: 2))
-                        
-                        foundVatPercentages.append("\(pctString)%")
-                        let sanitizedVal = valString.replacingOccurrences(of: ",", with: ".")
-                        if let val = Double(sanitizedVal) {
-                            foundVatAmounts.append(val)
+            for box in boxes {
+                let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
+                if cleanText.isFuzzyMatch("TVA", tolerance: 1) || cleanText.contains("TVA") {
+                    let lineBoxes = boxes.filter {
+                        ($0.x != box.x || $0.y != box.y) &&
+                        abs($0.y - box.y) < 20 &&
+                        $0.x > box.x - 20
+                    }.sorted { $0.x < $1.x }
+                    
+                    let lineText = lineBoxes.map { $0.text }.joined(separator: " ")
+                    let vatPattern = "([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*%[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
+                    
+                    if let regex = try? NSRegularExpression(pattern: vatPattern, options: []) {
+                        let nsString = lineText as NSString
+                        if let match = regex.firstMatch(in: lineText, options: [], range: NSRange(location: 0, length: nsString.length)), match.numberOfRanges > 2 {
+                            let pctString = nsString.substring(with: match.range(at: 1))
+                            let valString = nsString.substring(with: match.range(at: 2)).replacingOccurrences(of: ",", with: ".")
+                            if let val = Double(valString) {
+                                foundVatPercentages.append("\(pctString)%")
+                                foundVatAmounts.append(val)
+                            }
                         }
                     }
                 }
             }
             
-            // Fallback: Daca nu s-a gasit nicio cota explicita, cautam "TOTAL TVA"
+            // Fallback TVA
             if foundVatAmounts.isEmpty {
                 let totalVatPattern = "TOTAL\\s*TVA[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
-                if let regex = try? NSRegularExpression(pattern: totalVatPattern, options: []) {
-                    let nsString = fullText as NSString
-                    if let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length)), match.numberOfRanges > 1 {
-                        let valString = nsString.substring(with: match.range(at: 1))
-                        let sanitizedVal = valString.replacingOccurrences(of: ",", with: ".")
-                        if let val = Double(sanitizedVal) {
-                            foundVatAmounts.append(val)
-                            foundVatPercentages.append("Mixt")
-                        }
+                if let regex = try? NSRegularExpression(pattern: totalVatPattern, options: []),
+                   let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)), match.numberOfRanges > 1 {
+                    let valString = (fullText as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+                    if let val = Double(valString) {
+                        foundVatAmounts.append(val)
+                        foundVatPercentages.append("Mixt")
                     }
                 }
             }
             
             if !foundVatAmounts.isEmpty {
                 let sumVat = foundVatAmounts.reduce(0, +)
-                result.vatAmount = (sumVat * 100).rounded() / 100 // Rotunjire 2 zecimale
+                result.vatAmount = (sumVat * 100).rounded() / 100
                 result.vatPercentages = Array(Set(foundVatPercentages)).joined(separator: ", ")
                 result.vatRequiresVerification = false
                 
@@ -873,7 +903,6 @@ class FinancialAmountsAgent: AccountingAgent {
                     result.baseAmount = ((total - result.vatAmount!) * 100).rounded() / 100
                 }
             } else {
-                // Nu exista linii TVA
                 result.vatAmount = 0
                 result.vatPercentages = "-"
                 result.baseAmount = result.totalAmount
@@ -889,7 +918,7 @@ class FiscalComplianceAgent: AccountingAgent {
         self.buyerCui = buyerCui
     }
     
-    func process(textBlocks: [String], result: inout AccountingResult) async {
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
         let fullText = textBlocks.joined(separator: " ").uppercased()
         
         if result.documentType == "Bon Fiscal" {
@@ -957,7 +986,33 @@ class FiscalComplianceAgent: AccountingAgent {
 public class AccountingOrchestrator {
     public static let shared = AccountingOrchestrator()
     
-    public func processOcrResult(textBlocks: [String], buyerCui: String? = nil) async -> AccountingResult {
+    public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil) async -> AccountingResult {
+        // Generate textBlocks (grouped by lines) for legacy regex usage
+        var textBlocks: [String] = []
+        let sortedByY = boxes.sorted { $0.y < $1.y }
+        if !sortedByY.isEmpty {
+            var lines: [[OCRBoxItem]] = []
+            var currentLine = [sortedByY[0]]
+            let sortedHeights = sortedByY.map { $0.h }.sorted()
+            let medianHeight = sortedHeights[sortedHeights.count / 2]
+            let yTolerance = medianHeight * 0.4
+            
+            for box in sortedByY.dropFirst() {
+                if abs(box.y - currentLine[0].y) < yTolerance {
+                    currentLine.append(box)
+                } else {
+                    lines.append(currentLine)
+                    currentLine = [box]
+                }
+            }
+            lines.append(currentLine)
+            
+            textBlocks = lines.map { line -> String in
+                let sortedLine = line.sorted { $0.x < $1.x }
+                return sortedLine.map { $0.text }.joined(separator: " ")
+            }
+        }
+        
         var result = AccountingResult()
         
         let agents: [AccountingAgent] = [
@@ -969,7 +1024,7 @@ public class AccountingOrchestrator {
         ]
         
         for agent in agents {
-            await agent.process(textBlocks: textBlocks, result: &result)
+            await agent.process(textBlocks: textBlocks, boxes: boxes, result: &result)
         }
         return result
     }
@@ -1024,5 +1079,27 @@ public class AccountingOrchestrator {
         
         // Sortam clusterele de la stanga la dreapta (cum stau bonurile pe masa)
         return validClusters.sorted { $0[0].x < $1[0].x }
+    }
+}
+
+// MARK: - Fuzzy String Matching (Levenshtein)
+
+extension String {
+    func levenshteinDistance(to string: String) -> Int {
+        let empty = [Int](repeating: 0, count: string.count + 1)
+        var last = [Int](0...string.count)
+        
+        for (i, char1) in self.enumerated() {
+            var cur = [i + 1] + empty.dropFirst()
+            for (j, char2) in string.enumerated() {
+                cur[j + 1] = char1 == char2 ? last[j] : Swift.min(last[j], last[j + 1], cur[j]) + 1
+            }
+            last = cur
+        }
+        return last.last ?? 0
+    }
+    
+    func isFuzzyMatch(_ other: String, tolerance: Int = 1) -> Bool {
+        return self.uppercased().levenshteinDistance(to: other.uppercased()) <= tolerance
     }
 }
