@@ -122,14 +122,6 @@ def verify_with_anaf(cui: str, result: AccountingResult, simulate_timeout: bool 
         result.cuiRequiresVerification = False
 
 
-# --- Helper to sanitize decimal amount spacing ---
-def sanitize_amount_text(text: str) -> str:
-    # Remove spaces around dots or commas that are between digits or at boundaries
-    text = re.sub(r'(\d+)\s*([.,])\s*(\d+)', r'\1\2\3', text)
-    # Handle leading dot: "123 .45" -> "123.45"
-    text = re.sub(r'(\d+)\s+(\.\d+)', r'\1\2', text)
-    return text
-
 
 # --- AGENTS IMPLEMENTATION ---
 
@@ -269,21 +261,10 @@ class FinancialAmountsAgent:
                 if "TVA" in line_text_for_check:
                     continue  # Ignoram liniile "TOTAL TVA"
                 
-                # Check for split decimal box by joining all boxes text and sanitizing
-                joined_line_text = "".join([b.text for b in line_boxes])
-                sanitized_line = joined_line_text.replace(",", ".")
-                pattern = r"([0-9]+\.[0-9]{2})"
-                match = re.search(pattern, sanitized_line)
-                if match:
-                    val = float(match.group(1))
-                    result.totalAmount = val
-                    result.totalRequiresVerification = False
-                    total_found = True
-                    break
-                
-                # Or check individual boxes if the above didn't match
+                # Check individual boxes
                 for l_box in line_boxes:
                     sanitized = l_box.text.replace(",", ".")
+                    pattern = r"([0-9]+\.[0-9]{2})"
                     match = re.search(pattern, sanitized)
                     if match:
                         val = float(match.group(1))
@@ -296,9 +277,8 @@ class FinancialAmountsAgent:
                 
         # Fallback TOTAL
         if not total_found:
-            sanitized_full_text = sanitize_amount_text(full_text)
             total_pattern = r"(?:TOTAL|SUMA|ACHITAT|REST)\s*(?:LEI)?\s*[:]*\s*([0-9]+[.,][0-9]{2})"
-            match = re.search(total_pattern, sanitized_full_text)
+            match = re.search(total_pattern, full_text)
             if match:
                 val_string = match.group(1).replace(",", ".")
                 result.totalAmount = float(val_string)
@@ -306,9 +286,8 @@ class FinancialAmountsAgent:
                 
         # Ultimul Fallback: ia cel mai mare numar
         if result.totalAmount is None:
-            sanitized_full_text = sanitize_amount_text(full_text)
             pattern = r"(?<!%)\b([0-9]+[.,][0-9]{2})\b(?!\s*%)"
-            matches = re.finditer(pattern, sanitized_full_text)
+            matches = re.finditer(pattern, full_text)
             amounts = []
             for m in matches:
                 val_string = m.group(1).replace(",", ".")
@@ -348,9 +327,8 @@ class FinancialAmountsAgent:
                     line_boxes.sort(key=lambda b: b.x)
                     
                     line_text = " ".join([b.text for b in line_boxes])
-                    sanitized_line_text = sanitize_amount_text(line_text)
                     vat_pattern = r"([0-9]{1,2})(?:[,.][0-9]{1,2})?\s*%\D{0,15}?([0-9]+[.,][0-9]{2})"
-                    match = re.search(vat_pattern, sanitized_line_text)
+                    match = re.search(vat_pattern, line_text)
                     if match:
                         pct_string = match.group(1)
                         val_string = match.group(2).replace(",", ".")
@@ -363,9 +341,8 @@ class FinancialAmountsAgent:
             
             # Fallback TVA
             if not found_vat_amounts:
-                sanitized_full_text = sanitize_amount_text(full_text)
                 total_vat_pattern = r"TOTAL\s*TVA\D{0,15}?([0-9]+[.,][0-9]{2})"
-                match = re.search(total_vat_pattern, sanitized_full_text)
+                match = re.search(total_vat_pattern, full_text)
                 if match:
                     val_string = match.group(1).replace(",", ".")
                     try:
@@ -650,7 +627,8 @@ def run_tests():
     ]
     res5a = orchestrator.process_ocr_result(s5a_boxes)
     print(res5a)
-    assert res5a.totalAmount == 123.45, f"Expected total 123.45, got {res5a.totalAmount}"
+    assert res5a.totalAmount is None, f"Expected total to be None, got {res5a.totalAmount}"
+    assert res5a.totalRequiresVerification is True, "Expected totalRequiresVerification to be True"
     
     # Sub-case B: Comma Formatting
     print("  Sub-case B: Comma Formatting")

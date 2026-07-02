@@ -1,4 +1,4 @@
-# BRIEFING — 2026-07-02T20:26:00+03:00
+# BRIEFING — 2026-07-02T20:28:00+03:00
 
 ## Mission
 Remediate the simulation logic divergence in test_spatial_ocr.py to align exactly with Swift production codebase.
@@ -16,7 +16,7 @@ Remediate the simulation logic divergence in test_spatial_ocr.py to align exactl
 
 ## Current Parent
 - Conversation ID: 108dddc9-4393-4414-9a29-72353559d4f5
-- Updated: not yet
+- Updated: 2026-07-02T20:28:00+03:00
 
 ## Task Summary
 - **What to build**: Modify `test_spatial_ocr.py` to remove `sanitize_amount_text`, simplify decimal parsing inside `FinancialAmountsAgent.process` to check individual boxes using regex `r"([0-9]+\.[0-9]{2})"`, and update Split Decimal Box test case assertions to expect failure to parse the split decimal (totalAmount is None, totalRequiresVerification is True).
@@ -31,14 +31,15 @@ Remediate the simulation logic divergence in test_spatial_ocr.py to align exactl
 - e:\OCR Iphone\.agents\worker_m2_remediate_2\handoff.md — Handoff report
 
 ## Change Tracker
-- **Files modified**: [TBD]
-- **Build status**: [TBD]
-- **Pending issues**: [TBD]
+- **Files modified**:
+  - `e:\OCR Iphone\test_spatial_ocr.py` — Removed `sanitize_amount_text`, removed split decimal joining logic, used regex directly on full_text and line_text, updated Scenario 5 Sub-case A assertions.
+- **Build status**: Pending test run
+- **Pending issues**: Execute the test script and verify all assertions pass.
 
 ## Quality Status
-- **Build/test result**: [TBD]
-- **Lint status**: [TBD]
-- **Tests added/modified**: [TBD]
+- **Build/test result**: Pending
+- **Lint status**: 0 violations
+- **Tests added/modified**: Scenario 5 Sub-case A updated
 
 ## Loaded Skills
 - **Source**: none
