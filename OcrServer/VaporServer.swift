@@ -884,7 +884,6 @@ class FinancialAmountsAgent: AccountingAgent {
                 if cleanText.isFuzzyMatch("TVA", tolerance: 1) || cleanText.contains("TVA") {
                     let yTol = max(box.h * 0.6, 15.0)
                     let lineBoxes = boxes.filter {
-                        ($0.x != box.x || $0.y != box.y) &&
                         abs($0.y - box.y) < yTol &&
                         $0.x > box.x - box.w * 0.5
                     }.sorted { $0.x < $1.x }
@@ -1095,25 +1094,36 @@ public class AccountingOrchestrator {
         let medianHeight = sortedHeights[sortedHeights.count / 2]
         
         // 1. Anchor-based clustering (bazat pe CUI/CIF Vânzător)
-        let cuiPattern = "(?i)(?:CUI|CIF|FISCAL|C\\.I\\.F|C\\.F)\\s*[:.]?\\s*(?:RO)?\\s*([0-9]{5,10})"
-        var extractedAnchors: [(box: OCRBoxItem, cuiStr: String)] = []
+        let fullText = boxes.map { $0.text }.joined(separator: " ").uppercased()
+        let cuiPattern = "(?i)(?:CUI|CIF|FISCAL[A-Z]*|C\\.I\\.F|C\\.F)\\s*[:.]?\\s*(?:RO)?\\s*([0-9]{5,10})"
+        var foundCuis: [String] = []
         if let regex = try? NSRegularExpression(pattern: cuiPattern, options: []) {
-            for box in boxes {
-                let text = box.text.uppercased()
-                let cleanText = text.replacingOccurrences(of: " ", with: "")
-                
-                // Excludem CUI-urile de client
-                if text.contains("CLIENT") || text.contains("CUMP") || text.contains("BENEF") || text.contains("CNP") || text.contains("C.N.P") {
-                    continue
-                }
-                
-                let range = NSRange(location: 0, length: cleanText.utf16.count)
-                if let match = regex.firstMatch(in: cleanText, options: [], range: range) {
-                    if match.numberOfRanges > 1 {
-                        let nsStr = cleanText as NSString
-                        let cuiStr = nsStr.substring(with: match.range(at: 1))
-                        extractedAnchors.append((box, cuiStr))
+            let nsStr = fullText as NSString
+            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsStr.length))
+            for match in results {
+                if match.numberOfRanges > 1 {
+                    let cuiStr = nsStr.substring(with: match.range(at: 1))
+                    if !foundCuis.contains(cuiStr) {
+                        foundCuis.append(cuiStr)
                     }
+                }
+            }
+        }
+        
+        var extractedAnchors: [(box: OCRBoxItem, cuiStr: String)] = []
+        for box in boxes {
+            let text = box.text.uppercased()
+            let cleanText = text.replacingOccurrences(of: " ", with: "")
+            
+            // Excludem CUI-urile de client
+            if text.contains("CLIENT") || text.contains("CUMP") || text.contains("BENEF") || text.contains("CNP") || text.contains("C.N.P") {
+                continue
+            }
+            
+            for cui in foundCuis {
+                if cleanText.contains(cui) {
+                    extractedAnchors.append((box, cui))
+                    break
                 }
             }
         }
@@ -1134,8 +1144,8 @@ public class AccountingOrchestrator {
                     isDuplicate = true
                     break
                 }
-                // Daca sunt prea aproape fizic (evitam dubla potrivire pe acelasi bloc de text)
-                if dx < medianHeight * 10.0 && dy < medianHeight * 15.0 {
+                // Daca sunt prea aproape fizic (evitam dubla potrivire pe acelasi bloc de text care a fost impartit de OCR)
+                if dx < medianHeight * 5.0 && dy < medianHeight * 2.0 {
                     isDuplicate = true
                     break
                 }
@@ -1156,9 +1166,18 @@ public class AccountingOrchestrator {
                 var bestIdx = 0
                 for (i, anchor) in uniqueAnchors.enumerated() {
                     let dx = abs(box.x - anchor.x)
-                    let dy = abs(box.y - anchor.y)
-                    // Un bon e vertical. Distanta orizontala o penalizam de 10 ori mai mult
-                    let dist = dx * 10.0 + dy
+                    var dy = box.y - anchor.y
+                    
+                    // Daca textul este DEASUPRA ancorei (dy negativ), penalizam enorm.
+                    // CUI-ul e mereu sus, restul bonului e in jos.
+                    if dy < -medianHeight * 2.0 {
+                        dy = abs(dy) + 10000.0
+                    } else {
+                        dy = abs(dy)
+                    }
+                    
+                    // Penalizam moderat distanta orizontala, ca textele indendate sa ramana la bonul lor
+                    let dist = dx * 3.0 + dy
                     if dist < bestDist {
                         bestDist = dist
                         bestIdx = i
