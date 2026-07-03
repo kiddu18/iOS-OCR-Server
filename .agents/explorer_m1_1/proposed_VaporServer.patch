@@ -1,0 +1,799 @@
+diff --git a/OcrServer/VaporServer.swift b/OcrServer/VaporServer.swift
+index 1000000..2000000
+--- a/OcrServer/VaporServer.swift
++++ b/OcrServer/VaporServer.swift
+@@ -713,29 +713,2 @@ class CuiExtractorAgent: AccountingAgent {
+-    
+-    private func isValidCUI(cui: String) -> Bool {
+-        guard cui.count >= 2 && cui.count <= 10 else { return false }
+-        guard let _ = Int(cui) else { return false }
+-        
+-        let controlKey = "753217532"
+-        let controlKeyReversed = String(controlKey.reversed())
+-        let cuiReversed = String(cui.reversed())
+-        
+-        var sum = 0
+-        let cuiArray = Array(cuiReversed)
+-        let keyArray = Array(controlKeyReversed)
+-        
+-        guard let controlDigit = Int(String(cuiArray[0])) else { return false }
+-        
+-        for i in 1..<cuiArray.count {
+-            if i - 1 < keyArray.count {
+-                if let cNum = Int(String(cuiArray[i])), let kNum = Int(String(keyArray[i - 1])) {
+-                    sum += cNum * kNum
+-                }
+-            }
+-        }
+-        
+-        let calcControlDigit = (sum * 10) % 11
+-        let finalControlDigit = calcControlDigit == 10 ? 0 : calcControlDigit
+-        
+-        return finalControlDigit == controlDigit
+-    }
+     
+@@ -794,155 +792,154 @@ class CuiExtractorAgent: AccountingAgent {
+-class FinancialAmountsAgent: AccountingAgent {
+-    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
+-        let fullText = textBlocks.joined(separator: "\n").uppercased()
+-        
+-        // --- SPATIAL TOTAL EXTRACTION ---
+-        let totalKeywords = ["TOTAL", "SUMA", "ACHITAT"]
+-        var totalFound = false
+-        
+-        for box in boxes {
+-            let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
+-            if totalKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
+-                // Cauta numere pe aceeasi linie (axa Y similara), la dreapta
+-                let yTol = max(box.h * 0.6, 15.0)
+-                let lineBoxes = boxes.filter {
+-                    ($0.x != box.x || $0.y != box.y) &&
+-                    abs($0.y - box.y) < yTol &&
+-                    $0.x > box.x - box.w * 0.5
+-                }.sorted { $0.x < $1.x }
+-                
+-                let lineTextForCheck = lineBoxes.map { $0.text.uppercased() }.joined(separator: " ")
+-                if lineTextForCheck.contains("TVA") {
+-                    continue // Ignoram liniile "TOTAL TVA"
+-                }
+-                
+-                for lBox in lineBoxes {
+-                    let sanitized = lBox.text.replacingOccurrences(of: ",", with: ".")
+-                    let pattern = "([0-9]+[.][0-9]{2})"
+-                    if let regex = try? NSRegularExpression(pattern: pattern, options: []),
+-                       let match = regex.firstMatch(in: sanitized, options: [], range: NSRange(location: 0, length: sanitized.utf16.count)) {
+-                        let matchedString = (sanitized as NSString).substring(with: match.range(at: 1))
+-                        if let val = Double(matchedString) {
+-                            result.totalAmount = val
+-                            result.totalRequiresVerification = false
+-                            totalFound = true
+-                            break
+-                        }
+-                    }
+-                }
+-            }
+-            if totalFound { break }
+-        }
+-        
+-        // Fallback TOTAL
+-        if !totalFound {
+-            let totalPattern = "(?:TOTAL|SUMA|ACHITAT|REST)\\s*(?:LEI)?\\s*[:]*\\s*([0-9]+[.,][0-9]{2})"
+-            if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
+-               let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
+-                let matchedString = (fullText as NSString).substring(with: match.range(at: 1))
+-                if let val = Double(matchedString.replacingOccurrences(of: ",", with: ".")) {
+-                    result.totalAmount = val
+-                    result.totalRequiresVerification = false
+-                }
+-            }
+-        }
+-        
+-        // Ultimul Fallback: ia cel mai mare numar
+-        if result.totalAmount == nil {
+-            let pattern = "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)"
+-            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+-                let nsString = fullText as NSString
+-                let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
+-                var amounts: [Double] = []
+-                for match in results {
+-                    let matchedString = nsString.substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+-                    if let val = Double(matchedString), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00 {
+-                        amounts.append(val)
+-                    }
+-                }
+-                amounts.sort(by: >)
+-                if !amounts.isEmpty {
+-                    result.totalAmount = amounts[0]
+-                    result.totalRequiresVerification = true
+-                }
+-            }
+-        }
+-        
+-        let isReceipt = result.documentType == "Chitanță POS" || result.documentType == "Chitanță de mână"
+-        
+-        if isReceipt {
+-            result.vatAmount = 0
+-            result.vatPercentages = "-"
+-            result.baseAmount = result.totalAmount
+-            result.vatRequiresVerification = false
+-        } else {
+-            // --- SPATIAL TVA EXTRACTION ---
+-            var foundVatAmounts: [Double] = []
+-            var foundVatPercentages: [String] = []
+-            
+-            for box in boxes {
+-                let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
+-                if cleanText.isFuzzyMatch("TVA", tolerance: 1) || cleanText.contains("TVA") {
+-                    let yTol = max(box.h * 0.6, 15.0)
+-                    let lineBoxes = boxes.filter {
+-                        abs($0.y - box.y) < yTol &&
+-                        $0.x > box.x - box.w * 0.5
+-                    }.sorted { $0.x < $1.x }
+-                    
+-                    let lineText = lineBoxes.map { $0.text }.joined(separator: " ")
+-                    let vatPattern = "([0-9]{1,2})(?:[,.][0-9]{1,2})?\\s*[%][^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
+-                    
+-                    if let regex = try? NSRegularExpression(pattern: vatPattern, options: []) {
+-                        let nsString = lineText as NSString
+-                        if let match = regex.firstMatch(in: lineText, options: [], range: NSRange(location: 0, length: nsString.length)), match.numberOfRanges > 2 {
+-                            let pctString = nsString.substring(with: match.range(at: 1))
+-                            let valString = nsString.substring(with: match.range(at: 2)).replacingOccurrences(of: ",", with: ".")
+-                            if let val = Double(valString) {
+-                                foundVatPercentages.append("\(pctString)%")
+-                                foundVatAmounts.append(val)
+-                            }
+-                        }
+-                    }
+-                }
+-            }
+-            
+-            // Fallback TVA
+-            if foundVatAmounts.isEmpty {
+-                let totalVatPattern = "TOTAL\\s*TVA[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
+-                if let regex = try? NSRegularExpression(pattern: totalVatPattern, options: []),
+-                   let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)), match.numberOfRanges > 1 {
+-                    let valString = (fullText as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+-                    if let val = Double(valString) {
+-                        foundVatAmounts.append(val)
+-                        foundVatPercentages.append("Mixt")
+-                    }
+-                }
+-            }
+-            
+-            if !foundVatAmounts.isEmpty {
+-                var breakdowns: [VatBreakdown] = []
+-                for i in 0..<foundVatAmounts.count {
+-                    let pctStr = foundVatPercentages[i].replacingOccurrences(of: "%", with: "")
+-                    let pct = Double(pctStr) ?? 19.0
+-                    let val = foundVatAmounts[i]
+-                    // Daca e Mixt, calculul nu se poate face doar din TVA, dar e fallback.
+-                    let base = pct > 0 ? (val * 100.0) / pct : (result.totalAmount ?? val)
+-                    let roundedBase = (base * 100).rounded() / 100
+-                    breakdowns.append(VatBreakdown(percentage: foundVatPercentages[i], vatAmount: val, baseAmount: roundedBase))
+-                }
+-                result.vatBreakdowns = breakdowns
+-                
+-                let sumVat = foundVatAmounts.reduce(0, +)
+-                result.vatAmount = (sumVat * 100).rounded() / 100
+-                result.vatPercentages = Array(Set(foundVatPercentages)).joined(separator: ", ")
+-                result.vatRequiresVerification = false
+-                
+-                if let total = result.totalAmount {
+-                    result.baseAmount = ((total - result.vatAmount!) * 100).rounded() / 100
+-                }
+-            } else {
+-                result.vatAmount = 0
+-                result.vatPercentages = "-"
+-                result.baseAmount = result.totalAmount
+-            }
+-        }
+-    }
+-}
++class FinancialAmountsAgent: AccountingAgent {
++    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
++        let fullText = textBlocks.joined(separator: "\n").uppercased()
++        
++        let sortedHeights = boxes.map { $0.h }.sorted()
++        let medianHeight = sortedHeights.isEmpty ? 15.0 : sortedHeights[sortedHeights.count / 2]
++        
++        // --- SPATIAL TOTAL EXTRACTION ---
++        let totalKeywords = ["TOTAL", "SUMA", "ACHITAT"]
++        var totalFound = false
++        
++        // Group boxes into lines
++        var lines: [[OCRBoxItem]] = []
++        let sortedByY = boxes.sorted { $0.y < $1.y }
++        if !sortedByY.isEmpty {
++            var currentLine = [sortedByY[0]]
++            let yTolerance = medianHeight * 0.4
++            
++            for box in sortedByY.dropFirst() {
++                if abs(box.y - currentLine[0].y) < yTolerance {
++                    currentLine.append(box)
++                } else {
++                    lines.append(currentLine)
++                    currentLine = [box]
++                }
++            }
++            lines.append(currentLine)
++        }
++        
++        for line in lines {
++            let sortedLine = line.sorted { $0.x < $1.x }
++            for (idx, box) in sortedLine.enumerated() {
++                let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
++                if totalKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
++                    let lineText = sortedLine.map { $0.text.uppercased() }.joined(separator: " ")
++                    if lineText.contains("TVA") || lineText.contains("TAXA") || lineText.contains("TAXE") {
++                        continue
++                    }
++                    
++                    for lBox in sortedLine[idx...] {
++                        if lBox.x <= box.x { continue }
++                        let sanitized = lBox.text.replacingOccurrences(of: ",", with: ".")
++                        let pattern = "([0-9]+[.][0-9]{2})"
++                        if let regex = try? NSRegularExpression(pattern: pattern, options: []),
++                           let match = regex.firstMatch(in: sanitized, options: [], range: NSRange(location: 0, length: sanitized.utf16.count)) {
++                            let matchedString = (sanitized as NSString).substring(with: match.range(at: 1))
++                            if let val = Double(matchedString) {
++                                result.totalAmount = val
++                                result.totalRequiresVerification = false
++                                totalFound = true
++                                break
++                            }
++                        }
++                    }
++                }
++                if totalFound { break }
++            }
++            if totalFound { break }
++        }
++        
++        // Fallback TOTAL
++        if !totalFound {
++            let totalPattern = "(?i)(?:TOTAL|SUMA|ACHITAT|REST)\\s*(?:LEI)?\\s*[:=]*\\s*([0-9]+[.,][0-9]{2})"
++            if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
++               let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
++                let matchedString = (fullText as NSString).substring(with: match.range(at: 1))
++                if let val = Double(matchedString.replacingOccurrences(of: ",", with: ".")) {
++                    result.totalAmount = val
++                    result.totalRequiresVerification = false
++                    totalFound = true
++                }
++            }
++        }
++        
++        // Final Fallback: largest number
++        if result.totalAmount == nil {
++            let pattern = "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)"
++            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
++                let nsString = fullText as NSString
++                let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
++                var amounts: [Double] = []
++                for match in results {
++                    let matchedString = nsString.substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
++                    if let val = Double(matchedString), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00 {
++                        amounts.append(val)
++                    }
++                }
++                amounts.sort(by: >)
++                if !amounts.isEmpty {
++                    result.totalAmount = amounts[0]
++                    result.totalRequiresVerification = true
++                }
++            }
++        }
++        
++        let isReceipt = result.documentType == "Chitanță POS" || result.documentType == "Chitanță de mână"
++        
++        if isReceipt {
++            result.vatAmount = 0
++            result.vatPercentages = "-"
++            result.baseAmount = result.totalAmount
++            result.vatRequiresVerification = false
++        } else {
++            var breakdowns: [VatBreakdown] = []
++            
++            for line in lines {
++                let sortedLine = line.sorted { $0.x < $1.x }
++                let lineText = sortedLine.map { $0.text }.joined(separator: " ")
++                
+                 // Find percentage
++                let pctPattern = "\\b([0-9]{1,2})(?:[.,][0-9]{1,2})?\\s*%"
++                guard let pctRegex = try? NSRegularExpression(pattern: pctPattern, options: []),
++                      let pctMatch = pctRegex.firstMatch(in: lineText, options: [], range: NSRange(location: 0, length: lineText.utf16.count)) else {
++                    continue
++                }
++                
++                let pctRange = pctMatch.range(at: 0)
++                let nsLineText = lineText as NSString
++                let pctMatchString = nsLineText.substring(with: pctRange)
++                let cleanLineText = lineText.replacingOccurrences(of: pctMatchString, with: "")
++                
++                let pctStr = nsLineText.substring(with: pctMatch.range(at: 1))
++                guard let rate = Double(pctStr) else { continue }
++                
++                // Find all other decimal numbers
++                let decPattern = "\\b([0-9]+[.,][0-9]{2})\b"
++                guard let decRegex = try? NSRegularExpression(pattern: decPattern, options: []) else { continue }
++                let nsCleanText = cleanLineText as NSString
++                let matches = decRegex.matches(in: cleanLineText, options: [], range: NSRange(location: 0, length: nsCleanText.length))
++                
++                var vals: [Double] = []
++                for m in matches {
++                    let matchedStr = nsCleanText.substring(with: m.range(at: 1)).replacingOccurrences(of: ",", with: ".")
++                    if let val = Double(matchedStr) {
++                        vals.append(val)
++                    }
++                }
++                
++                var vatAmount: Double? = nil
++                var baseAmount: Double? = nil
++                
++                if vals.count >= 2 {
++                    for i in 0..<vals.count {
++                        for j in 0..<vals.count {
++                            if i == j { continue }
++                            let baseCand = vals[i]
++                            let vatCand = vals[j]
++                            if abs(vatCand - baseCand * (rate / 100.0)) < 0.05 {
++                                vatAmount = vatCand
++                                baseAmount = baseCand
++                                break
++                            }
++                        }
++                        if vatAmount != nil { break }
++                    }
++                    
++                    if vatAmount == nil {
++                        for i in 0..<vals.count {
++                            for j in 0..<vals.count {
++                                if i == j { continue }
++                                let baseCand = vals[i]
++                                let totalCand = vals[j]
++                                if abs(totalCand - baseCand * (1.0 + rate / 100.0)) < 0.05 {
++                                    baseAmount = baseCand
++                                    vatAmount = (totalCand - baseCand * 100).rounded() / 100
++                                    break
++                                }
++                            }
++                            if vatAmount != nil { break }
++                        }
++                    }
++                    
++                    if vatAmount == nil {
++                        let sortedVals = vals.sorted()
++                        vatAmount = sortedVals[0]
++                        baseAmount = sortedVals[1]
++                    }
++                } else if vals.count == 1 {
++                    let val = vals[0]
++                    if let total = result.totalAmount, abs(val - total) < 0.05 {
++                        baseAmount = (total / (1.0 + rate / 100.0) * 100).rounded() / 100
++                        vatAmount = ((total - baseAmount!) * 100).rounded() / 100
++                    } else {
++                        vatAmount = val
++                        baseAmount = (val / (rate / 100.0) * 100).rounded() / 100
++                    }
++                }
++                
++                if let vat = vatAmount, let base = baseAmount {
++                    let pctString = "\(Int(rate))%"
++                    if !breakdowns.contains(where: { $0.percentage == pctString }) {
++                        breakdowns.append(VatBreakdown(percentage: pctString, vatAmount: vat, baseAmount: base))
++                    }
++                }
++            }
++            
++            if breakdowns.isEmpty {
++                let totalVatPattern = "TOTAL\\s*TVA[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
++                if let regex = try? NSRegularExpression(pattern: totalVatPattern, options: []),
++                   let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)), match.numberOfRanges > 1 {
++                    let valString = (fullText as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
++                    if let val = Double(valString) {
++                        let pctString = "Mixt"
++                        let base = result.totalAmount != nil ? (result.totalAmount! - val) : val
++                        breakdowns.append(VatBreakdown(percentage: pctString, vatAmount: val, baseAmount: base))
++                    }
++                }
++            }
++            
++            if !breakdowns.isEmpty {
++                result.vatBreakdowns = breakdowns
++                let sumVat = breakdowns.map { $0.vatAmount }.reduce(0, +)
++                result.vatAmount = (sumVat * 100).rounded() / 100
++                result.vatPercentages = breakdowns.map { $0.percentage }.joined(separator: ", ")
++                result.vatRequiresVerification = false
++                
++                if let total = result.totalAmount {
++                    result.baseAmount = ((total - result.vatAmount!) * 100).rounded() / 100
++                }
++            } else {
++                result.vatAmount = 0
++                result.vatPercentages = "-"
++                result.baseAmount = result.totalAmount
++            }
++        }
++    }
++}
+@@ -1089,116 +1086,143 @@ class AccountingOrchestrator {
+-    // Separa cutiile de text in documente distincte
+-    func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
+-        guard boxes.count > 1 else { return [boxes] }
+-        
+-        let sortedHeights = boxes.map { $0.h }.sorted()
+-        let medianHeight = sortedHeights[sortedHeights.count / 2]
+-        
+-        // 1. Anchor-based clustering (bazat pe CUI/CIF Vânzător)
+-        let fullText = boxes.map { $0.text }.joined(separator: " ").uppercased()
+-        let cuiPattern = "(?i)(?:CUI|CIF|FISCAL[A-Z]*|C\\.I\\.F|C\\.F)\\s*[:.]?\\s*(?:RO)?\\s*([0-9]{5,10})"
+-        var foundCuis: [String] = []
+-        if let regex = try? NSRegularExpression(pattern: cuiPattern, options: []) {
+-            let nsStr = fullText as NSString
+-            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsStr.length))
+-            for match in results {
+-                if match.numberOfRanges > 1 {
+-                    let cuiStr = nsStr.substring(with: match.range(at: 1))
+-                    if !foundCuis.contains(cuiStr) {
+-                        foundCuis.append(cuiStr)
+-                    }
+-                }
+-            }
+-        }
+-        
+-        var extractedAnchors: [(box: OCRBoxItem, cuiStr: String)] = []
+-        for box in boxes {
+-            let text = box.text.uppercased()
+-            let cleanText = text.replacingOccurrences(of: " ", with: "")
+-            
+-            // Excludem CUI-urile de client
+-            if text.contains("CLIENT") || text.contains("CUMP") || text.contains("BENEF") || text.contains("CNP") || text.contains("C.N.P") {
+-                continue
+-            }
+-            
+-            for cui in foundCuis {
+-                if cleanText.contains(cui) {
+-                    extractedAnchors.append((box, cui))
+-                    break
+-                }
+-            }
+-        }
+-        
+-        // Filtram ancorele pentru a pastra doar UNA per bon fizic
+-        var uniqueAnchors: [OCRBoxItem] = []
+-        var uniqueCuis: [String] = []
+-        for a in extractedAnchors {
+-            var isDuplicate = false
+-            for i in 0..<uniqueAnchors.count {
+-                let u = uniqueAnchors[i]
+-                let uCui = uniqueCuis[i]
+-                let dx = abs(u.x - a.box.x)
+-                let dy = abs(u.y - a.box.y)
+-                
+-                // Daca e acelasi CUI si e in aceeasi coloana (acelasi bon fizic)
+-                if uCui == a.cuiStr && dx < medianHeight * 10.0 {
+-                    isDuplicate = true
+-                    break
+-                }
+-                // Daca sunt prea aproape fizic (evitam dubla potrivire pe acelasi bloc de text care a fost impartit de OCR)
+-                if dx < medianHeight * 5.0 && dy < medianHeight * 2.0 {
+-                    isDuplicate = true
+-                    break
+-                }
+-            }
+-            if !isDuplicate {
+-                uniqueAnchors.append(a.box)
+-                uniqueCuis.append(a.cuiStr)
+-            }
+-        }
+-        
+-        var clusters: [[OCRBoxItem]] = []
+-        
+-        if uniqueAnchors.count > 1 {
+-            // Avem mai multe bonuri sigure! Aplicam Voronoi clustering cu penalizare orizontala
+-            var groups: [[OCRBoxItem]] = Array(repeating: [], count: uniqueAnchors.count)
+-            for box in boxes {
+-                var bestDist: CGFloat = .infinity
+-                var bestIdx = 0
+-                for (i, anchor) in uniqueAnchors.enumerated() {
+-                    let dx = abs(box.x - anchor.x)
+-                    var dy = box.y - anchor.y
+-                    
+-                    // Daca textul este DEASUPRA ancorei (dy negativ), penalizam enorm.
+-                    // CUI-ul e mereu sus, restul bonului e in jos.
+-                    if dy < -medianHeight * 2.0 {
+-                        dy = abs(dy) + 10000.0
+-                    } else {
+-                        dy = abs(dy)
+-                    }
+-                    
+-                    // Penalizam moderat distanta orizontala, ca textele indendate sa ramana la bonul lor
+-                    let dist = dx * 3.0 + dy
+-                    if dist < bestDist {
+-                        bestDist = dist
+-                        bestIdx = i
+-                    }
+-                }
+-                groups[bestIdx].append(box)
+-            }
+-            clusters = groups
+-        } else {
+-            // 2. Fallback: XY-Cut
+-            clusters = recursiveXYCut(boxes, medianHeight: medianHeight)
+-        }
+-        
+-        // Excludem gunoaiele (clustere cu doar 1-2 linii de text)
+-        clusters = clusters.filter { $0.count >= 3 }
+-        if clusters.isEmpty { return [boxes] }
+-        
+-        // Sortam clusterele (de sus in jos, stanga la dreapta)
+-        return clusters.sorted {
+-            if abs($0[0].y - $1[0].y) < medianHeight * 5.0 {
+-                return $0[0].x < $1[0].x
+-            }
+-            return $0[0].y < $1[0].y
+-        }
+-    }
++    private func extractCUI(from text: String) -> String? {
++        let clean = text.uppercased()
++            .replacingOccurrences(of: " ", with: "")
++            .replacingOccurrences(of: ".", with: "")
++            .replacingOccurrences(of: ":", with: "")
++            .replacingOccurrences(of: "-", with: "")
++        
++        let pattern = "[0-9]{2,10}"
++        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
++        let nsStr = clean as NSString
++        let matches = regex.matches(in: clean, options: [], range: NSRange(location: 0, length: nsStr.length))
++        
++        for match in matches {
++            let candidate = nsStr.substring(with: match.range)
++            if isValidCUI(cui: candidate) {
++                return candidate
++            }
++        }
++        return nil
++    }
++    
++    private func isBuyerCUIBox(_ box: OCRBoxItem, in boxes: [OCRBoxItem], medianHeight: CGFloat) -> Bool {
++        let text = box.text.uppercased()
++        let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP", "C.N.P"]
++        
++        for kw in buyerKeywords {
++            if text.contains(kw) {
++                return true
++            }
++        }
++        
++        for other in boxes {
++            if other.x == box.x && other.y == box.y { continue }
++            
++            let otherText = other.text.uppercased()
++            var hasBuyerKeyword = false
++            for kw in buyerKeywords {
++                if otherText.contains(kw) {
++                    hasBuyerKeyword = true
++                    break
++                }
++            }
++            if !hasBuyerKeyword { continue }
++            
++            let dy = box.y - other.y
++            let dx = box.x - other.x
++            
++            if abs(dy) < Double(medianHeight) * 1.5 && dx > 0 && dx < Double(medianHeight) * 12.0 {
++                return true
++            }
++            
++            if dy > 0 && dy < Double(medianHeight) * 2.5 && abs(dx) < Double(medianHeight) * 6.0 {
++                return true
++            }
++        }
++        
++        return false
++    }
++    
++    private func isSellerCUIBox(_ box: OCRBoxItem, in boxes: [OCRBoxItem], medianHeight: CGFloat) -> String? {
++        guard let cui = extractCUI(from: box.text) else { return nil }
++        
++        if isBuyerCUIBox(box, in: boxes, medianHeight: medianHeight) {
++            return nil
++        }
++        
++        let text = box.text.uppercased()
++        let sellerKeywords = ["CIF", "CUI", "CODFISCAL", "FISCAL", "C.I.F.", "C.F.", "RO"]
++        
++        var hasSellerKeyword = false
++        for kw in sellerKeywords {
++            if text.contains(kw) {
++                hasSellerKeyword = true
++                break
++            }
++        }
++        
++        if !hasSellerKeyword {
++            for other in boxes {
++                if other.x == box.x && other.y == box.y { continue }
++                let otherText = other.text.uppercased()
++                var otherHasKeyword = false
++                for kw in sellerKeywords {
++                    if otherText.contains(kw) {
++                        otherHasKeyword = true
++                        break
++                    }
++                }
++                if !otherHasKeyword { continue }
++                
++                let dy = abs(box.y - other.y)
++                let dx = abs(box.x - other.x)
++                
++                if dy < Double(medianHeight) * 2.0 && dx < Double(medianHeight) * 12.0 {
++                    hasSellerKeyword = true
++                    break
++                }
++            }
++        }
++        
++        if hasSellerKeyword {
++            return cui
++        }
++        
++        return nil
++    }
++
++    // Separa cutiile de text in documente distincte
++    func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
++        guard boxes.count > 1 else { return [boxes] }
++        
++        let sortedHeights = boxes.map { $0.h }.sorted()
++        let medianHeight = CGFloat(sortedHeights[sortedHeights.count / 2])
++        
++        var uniqueAnchors: [OCRBoxItem] = []
++        var uniqueCuis: [String] = []
++        
++        for box in boxes {
++            if let cui = isSellerCUIBox(box, in: boxes, medianHeight: medianHeight) {
++                var isDuplicate = false
++                for u in uniqueAnchors {
++                    let dx = abs(u.x - box.x)
++                    let dy = abs(u.y - box.y)
++                    if dx < medianHeight * 5.0 && dy < medianHeight * 2.0 {
++                        isDuplicate = true
++                        break
++                    }
++                }
++                if !isDuplicate {
++                    uniqueAnchors.append(box)
++                    uniqueCuis.append(cui)
++                }
++            }
++        }
++        
++        var clusters: [[OCRBoxItem]] = []
++        
++        if uniqueAnchors.count > 1 {
++            let sortedByX = uniqueAnchors.sorted { $0.x < $1.x }
++            var columns: [[OCRBoxItem]] = []
++            for anchor in sortedByX {
++                if var lastCol = columns.last, let lastAnchor = lastCol.last, CGFloat(anchor.x - lastAnchor.x) < medianHeight * 12.0 {
++                    columns[columns.count - 1].append(anchor)
++                } else {
++                    columns.append([anchor])
++                }
++            }
++            
++            let sortedByY = uniqueAnchors.sorted { $0.y < $1.y }
++            var rows: [[OCRBoxItem]] = []
++            for anchor in sortedByY {
++                if var lastRow = rows.last, let lastAnchor = lastRow.last, CGFloat(anchor.y - lastAnchor.y) < medianHeight * 15.0 {
++                    rows[rows.count - 1].append(anchor)
++                } else {
++                    rows.append([anchor])
++                }
++            }
++            
++            let colX = columns.map { col -> Double in col.map { $0.x }.reduce(0, +) / Double(col.count) }.sorted()
++            let rowY = rows.map { row -> Double in row.map { $0.y }.reduce(0, +) / Double(row.count) }.sorted()
++            
++            var vCuts: [Double] = []
++            if colX.count > 1 {
++                for i in 0..<(colX.count - 1) {
++                    vCuts.append((colX[i] + colX[i+1]) / 2.0)
++                }
++            }
++            
++            var hCuts: [Double] = []
++            if rowY.count > 1 {
++                for i in 0..<(rowY.count - 1) {
++                    hCuts.append((rowY[i] + rowY[i+1]) / 2.0)
++                }
++            }
++            
++            var cellToAnchorIdx: [String: Int] = [:]
++            for (idx, anchor) in uniqueAnchors.enumerated() {
++                var aCol = 0
++                for cut in vCuts {
++                    if anchor.x > cut { aCol += 1 }
++                }
++                var aRow = 0
++                for cut in hCuts {
++                    if anchor.y > cut { aRow += 1 }
++                }
++                cellToAnchorIdx["\(aRow),\(aCol)"] = idx
++            }
++            
++            var groups: [[OCRBoxItem]] = Array(repeating: [], count: uniqueAnchors.count)
++            
++            for box in boxes {
++                var bCol = 0
++                for cut in vCuts {
++                    if box.x > cut { bCol += 1 }
++                }
++                var bRow = 0
++                for cut in hCuts {
++                    if box.y > cut { bRow += 1 }
++                }
++                
++                if let idx = cellToAnchorIdx["\(bRow),\(bCol)"] {
++                    groups[idx].append(box)
++                } else {
++                    var bestDist: Double = .infinity
++                    var bestIdx = 0
++                    for (i, anchor) in uniqueAnchors.enumerated() {
++                        let dx = box.x - anchor.x
++                        let dy = box.y - anchor.y
++                        let dist = dx * dx + dy * dy
++                        if dist < bestDist {
++                            bestDist = dist
++                            bestIdx = i
++                        }
++                    }
++                    groups[bestIdx].append(box)
++                }
++            }
++            
++            clusters = groups
++        } else {
++            clusters = recursiveXYCut(boxes, medianHeight: medianHeight)
++        }
++        
++        clusters = clusters.filter { $0.count >= 3 }
++        if clusters.isEmpty { return [boxes] }
++        
++        return clusters.sorted {
++            if abs($0[0].y - $1[0].y) < Double(medianHeight) * 5.0 {
++                return $0[0].x < $1[0].x
++            }
++            return $0[0].y < $1[0].y
++        }
++    }
+@@ -1301,2 +1325,26 @@ extension String {
+ }
+ 
++func isValidCUI(cui: String) -> Bool {
++    guard cui.count >= 2 && cui.count <= 10 else { return false }
++    guard let _ = Int(cui) else { return false }
++    
++    let controlKey = "753217532"
++    let controlKeyReversed = String(controlKey.reversed())
++    let cuiReversed = String(cui.reversed())
++    
++    var sum = 0
++    let cuiArray = Array(cuiReversed)
++    let keyArray = Array(controlKeyReversed)
++    
++    guard let controlDigit = Int(String(cuiArray[0])) else { return false }
++    
++    for i in 1..<cuiArray.count {
++        if i - 1 < keyArray.count {
++            if let cNum = Int(String(cuiArray[i])), let kNum = Int(String(keyArray[i - 1])) {
++                sum += cNum * kNum
++            }
++        }
++    }
++    
++    let calcControlDigit = (sum * 10) % 11
++    let finalControlDigit = calcControlDigit == 10 ? 0 : calcControlDigit
++    
++    return finalControlDigit == controlDigit
++}

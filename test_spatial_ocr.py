@@ -38,6 +38,8 @@ class AccountingResult:
         
         self.baseAmount = None
         
+        self.vatBreakdowns = None
+        
         self.fiscalWarnings = []
 
     @property
@@ -186,11 +188,15 @@ class CuiExtractorAgent:
         
         for box in boxes:
             clean_text = box.text.upper().replace(".", "").replace(" ", "")
+            if "CLIENT" in clean_text or "CUMP" in clean_text or "BENEF" in clean_text or "CNP" in clean_text:
+                continue
             if any(kw in clean_text or (len(clean_text) <= len(kw) + 2 and is_fuzzy_match(clean_text, kw, 1)) for kw in cui_keywords):
                 candidate_boxes.append(box)
                 
         # Verificam textul din interiorul cutiilor gasite (poate CUI-ul e in aceeasi cutie: "CIF RO123456")
         for box in candidate_boxes:
+            if "%" in box.text:
+                continue
             text = box.text.upper().replace(" ", "").replace(".", "")
             numbers_only = "".join([c for c in text if c.isdigit()])
             if is_valid_cui(numbers_only):
@@ -212,6 +218,8 @@ class CuiExtractorAgent:
             nearby_boxes.sort(key=lambda b: b.x)
             
             for nb in nearby_boxes:
+                if "%" in nb.text:
+                    continue
                 text = nb.text.replace(" ", "").replace(".", "")
                 numbers_only = "".join([c for c in text if c.isdigit()])
                 if len(numbers_only) > 0 and is_valid_cui(numbers_only):
@@ -247,6 +255,8 @@ class FinancialAmountsAgent:
         
         for box in boxes:
             clean_text = box.text.upper().replace(" ", "").replace(":", "")
+            if "SUBTOTAL" in clean_text:
+                continue
             if any(kw in clean_text or (len(clean_text) <= len(kw) + 2 and is_fuzzy_match(clean_text, kw, 1)) for kw in total_keywords):
                 y_tol = max(box.h * 0.6, 15.0)
                 line_boxes = [
@@ -257,9 +267,9 @@ class FinancialAmountsAgent:
                 ]
                 line_boxes.sort(key=lambda b: b.x)
                 
-                line_text_for_check = " ".join([b.text.upper() for b in line_boxes])
-                if "TVA" in line_text_for_check:
-                    continue  # Ignoram liniile "TOTAL TVA"
+                line_text_for_check = " ".join([b.text.upper() for b in line_boxes]) + " " + box.text.upper()
+                if any(kw in line_text_for_check for kw in ["TVA", "TAXA", "TAXE"]):
+                    continue  # Ignoram liniile "TOTAL TVA", "TAXA", "TAXE"
                 
                 # Check individual boxes
                 for l_box in line_boxes:
@@ -360,6 +370,19 @@ class FinancialAmountsAgent:
                 
                 if result.totalAmount is not None:
                     result.baseAmount = round(result.totalAmount - result.vatAmount, 2)
+                
+                # Populate breakdowns
+                result.vatBreakdowns = []
+                for pct, vat in zip(found_vat_percentages, found_vat_amounts):
+                    rate = float(pct.replace("%", "")) if "%" in pct else 19.0
+                    base = round(vat / (rate / 100.0), 2)
+                    if result.totalAmount is not None and len(found_vat_amounts) == 1:
+                        base = round(result.totalAmount - vat, 2)
+                    result.vatBreakdowns.append({
+                        "percentage": pct,
+                        "vatAmount": vat,
+                        "baseAmount": base
+                    })
             else:
                 result.vatAmount = 0.0
                 result.vatPercentages = "-"
@@ -441,6 +464,20 @@ class AccountingOrchestrator:
         
         for agent in agents:
             agent.process(text_blocks, boxes, result)
+            
+        # --- SPLIT LOGIC ---
+        if result.vatBreakdowns and len(result.vatBreakdowns) > 0:
+            import copy
+            split_results = []
+            for b in result.vatBreakdowns:
+                split_copy = copy.deepcopy(result)
+                split_copy.vatPercentages = b["percentage"]
+                split_copy.vatAmount = b["vatAmount"]
+                split_copy.baseAmount = b["baseAmount"]
+                split_copy.totalAmount = round(b["baseAmount"] + b["vatAmount"], 2) if len(result.vatBreakdowns) > 1 else (result.totalAmount if result.totalAmount is not None else round(b["baseAmount"] + b["vatAmount"], 2))
+                split_copy.vatBreakdowns = None
+                split_results.append(split_copy)
+            return split_results[0]
             
         return result
 
