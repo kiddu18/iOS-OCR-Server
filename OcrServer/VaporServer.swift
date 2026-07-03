@@ -662,6 +662,66 @@ class DocumentDetailsAgent: AccountingAgent {
 
 class CuiExtractorAgent: AccountingAgent {
     func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
+        // Helper checking if a box represents a buyer
+        func isBuyerBox(_ box: OCRBoxItem, medianHeight: CGFloat) -> Bool {
+            let text = box.text.uppercased()
+            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP", "C.N.P"]
+            
+            for kw in buyerKeywords {
+                if text.contains(kw) { return true }
+            }
+            
+            let tokens = text.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+            for token in tokens {
+                for kw in buyerKeywords {
+                    let tolerance = (kw.count <= 3) ? 0 : 1
+                    if token.isFuzzyMatch(kw, tolerance: tolerance) {
+                        return true
+                    }
+                }
+            }
+            
+            for other in boxes {
+                if other.x == box.x && other.y == box.y { continue }
+                let otherText = other.text.uppercased()
+                var hasBuyerKeyword = false
+                for kw in buyerKeywords {
+                    if otherText.contains(kw) {
+                        hasBuyerKeyword = true
+                        break
+                    }
+                }
+                if !hasBuyerKeyword {
+                    let otherTokens = otherText.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+                    for token in otherTokens {
+                        for kw in buyerKeywords {
+                            let tolerance = (kw.count <= 3) ? 0 : 1
+                            if token.isFuzzyMatch(kw, tolerance: tolerance) {
+                                hasBuyerKeyword = true
+                                break
+                            }
+                        }
+                        if hasBuyerKeyword { break }
+                    }
+                }
+                if !hasBuyerKeyword { continue }
+                
+                let dy = box.y - other.y
+                let dx = box.x - other.x
+                
+                if abs(dy) < Double(medianHeight) * 1.5 && dx > 0 && dx < Double(medianHeight) * 12.0 {
+                    return true
+                }
+                if dy > 0 && dy < Double(medianHeight) * 2.5 && abs(dx) < Double(medianHeight) * 6.0 {
+                    return true
+                }
+            }
+            return false
+        }
+
+        let sortedHeights = boxes.map { $0.h }.sorted()
+        let medianHeight = sortedHeights.isEmpty ? 15.0 : CGFloat(sortedHeights[sortedHeights.count / 2])
+
         // 1. Cautare Spatiala Inteligenta 2D (Fuzzy)
         let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "RO"]
         var candidateBoxes: [OCRBoxItem] = []
@@ -669,8 +729,7 @@ class CuiExtractorAgent: AccountingAgent {
         for box in boxes {
             let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
             
-            // Excludem CUI-urile de client (asa cum am facut si la ancore)
-            if cleanText.contains("CLIENT") || cleanText.contains("CUMP") || cleanText.contains("BENEF") || cleanText.contains("CNP") {
+            if isBuyerBox(box, medianHeight: medianHeight) {
                 continue
             }
             
@@ -688,7 +747,6 @@ class CuiExtractorAgent: AccountingAgent {
                 result.cui = numbersOnly
                 result.cuiRequiresVerification = false
                 await verifyWithANAF(cui: numbersOnly, result: &result)
-                // Restabilim CUI-ul chiar daca ANAF zice fals (ANAF poate da timeout/eroare), noi am extras bine din poza
                 result.cui = numbersOnly 
                 return
             }
@@ -716,7 +774,7 @@ class CuiExtractorAgent: AccountingAgent {
             }
         }
         
-        // 2. Fallback la Regex-ul clasic (daca geometria a esuat sau OCR-ul a unit totul aiurea)
+        // 2. Fallback la Regex-ul clasic
         let fullText = textBlocks.joined(separator: " ").uppercased()
         let fallbackPattern = "\\b([0-9]{2,10})\\b"
         if let regex = try? NSRegularExpression(pattern: fallbackPattern, options: []) {
@@ -735,6 +793,62 @@ class CuiExtractorAgent: AccountingAgent {
                     }
                 }
             }
+        }
+        
+        // 3. Fallback: extractia de secvente alfanumerice din vecinatate (lungime 2-12)
+        print("[CUI Extraction] No mathematically valid CUI found. Attempting fallback for inaccurate OCR...")
+        
+        func cleanCandidate(_ rawText: String) -> String? {
+            var s = String(rawText.uppercased().filter { $0.isLetter || $0.isNumber })
+            let prefixes = ["CIF", "CUI", "RO", "R0", "COD", "FISCAL", "CODFISCAL"]
+            var changed = true
+            while changed {
+                changed = false
+                for prefix in prefixes {
+                    if s.hasPrefix(prefix) {
+                        s = String(s.dropFirst(prefix.count))
+                        changed = true
+                    }
+                }
+            }
+            if s.count >= 2 && s.count <= 12 && s.contains(where: { $0.isNumber }) {
+                return s
+            }
+            return nil
+        }
+        
+        var fallbackCandidates: [(text: String, distance: Double)] = []
+        
+        for box in candidateBoxes {
+            if let cleaned = cleanCandidate(box.text) {
+                fallbackCandidates.append((text: cleaned, distance: 0.0))
+            }
+        }
+        
+        for keywordBox in candidateBoxes {
+            let nearbyBoxes = boxes.filter {
+                ($0.x != keywordBox.x || $0.y != keywordBox.y) &&
+                $0.y >= keywordBox.y - keywordBox.h * 1.5 && $0.y <= keywordBox.y + keywordBox.h * 3.0 &&
+                $0.x >= keywordBox.x - keywordBox.w * 0.5
+            }
+            for nb in nearbyBoxes {
+                if nb.text.contains("%") { continue }
+                if let cleaned = cleanCandidate(nb.text) {
+                    let dx = nb.x - keywordBox.x
+                    let dy = nb.y - keywordBox.y
+                    let dist = sqrt(dx*dx + dy*dy)
+                    fallbackCandidates.append((text: cleaned, distance: dist))
+                }
+            }
+        }
+        
+        if !fallbackCandidates.isEmpty {
+            let sortedCandidates = fallbackCandidates.sorted { $0.distance < $1.distance }
+            let bestCandidate = sortedCandidates.first!.text
+            result.cui = bestCandidate
+            result.cuiRequiresVerification = true
+            print("[CUI Extraction] Fallback matched candidate: '\(bestCandidate)'")
+            return
         }
         
         result.cuiRequiresVerification = true
@@ -836,7 +950,12 @@ class FinancialAmountsAgent: AccountingAgent {
                 }.sorted { $0.x < $1.x }
                 
                 let lineText = lineBoxes.map { $0.text.uppercased() }.joined(separator: " ") + " " + box.text.uppercased()
-                if lineText.contains("TVA") || lineText.contains("TAXA") || lineText.contains("TAXE") {
+                var checkText = lineText
+                checkText = checkText.replacingOccurrences(of: "TVA INCLUS", with: "")
+                checkText = checkText.replacingOccurrences(of: "TVA INCL", with: "")
+                checkText = checkText.replacingOccurrences(of: "TAXE INCLUSE", with: "")
+                checkText = checkText.replacingOccurrences(of: "TAXA INCLUSA", with: "")
+                if checkText.contains("TVA") || checkText.contains("TAXA") || checkText.contains("TAXE") {
                     continue
                 }
                 
@@ -978,7 +1097,10 @@ class FinancialAmountsAgent: AccountingAgent {
                     }
                 } else if vals.count == 1 {
                     let val = vals[0]
-                    if let total = result.totalAmount, abs(val - total) < 0.05 {
+                    if rate == 0.0 {
+                        baseAmount = val
+                        vatAmount = 0.0
+                    } else if let total = result.totalAmount, abs(val - total) < 0.05 {
                         baseAmount = (total / (1.0 + rate / 100.0) * 100).rounded() / 100
                         vatAmount = ((total - baseAmount!) * 100).rounded() / 100
                     } else {
@@ -1015,8 +1137,12 @@ class FinancialAmountsAgent: AccountingAgent {
                 result.vatPercentages = breakdowns.map { $0.percentage }.joined(separator: ", ")
                 result.vatRequiresVerification = false
                 
-                if let total = result.totalAmount {
-                    result.baseAmount = ((total - result.vatAmount!) * 100).rounded() / 100
+                if result.totalAmount == nil {
+                    let sumBase = breakdowns.map { $0.baseAmount }.reduce(0, +)
+                    result.totalAmount = ((sumBase + result.vatAmount!) * 100).rounded() / 100
+                    result.baseAmount = sumBase
+                } else {
+                    result.baseAmount = ((result.totalAmount! - result.vatAmount!) * 100).rounded() / 100
                 }
             } else {
                 result.vatAmount = 0
@@ -1283,46 +1409,151 @@ public class AccountingOrchestrator {
         
         var uniqueAnchors: [OCRBoxItem] = []
         
-        // ANCHOR DETECTION: Folosim CUVINTE CHEIE (nu numere CUI) ca ancore.
-        // OCR-ul citeste mereu corect "COD FISCAL" sau "CIF", dar cifrele le poate strica.
-        let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
+        // Helper checking if a box represents a buyer
+        func isBuyerBox(_ box: OCRBoxItem) -> Bool {
+            let text = box.text.uppercased()
+            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP", "C.N.P"]
+            
+            for kw in buyerKeywords {
+                if text.contains(kw) { return true }
+            }
+            
+            let tokens = text.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+            for token in tokens {
+                for kw in buyerKeywords {
+                    let tolerance = (kw.count <= 3) ? 0 : 1
+                    if token.isFuzzyMatch(kw, tolerance: tolerance) {
+                        return true
+                    }
+                }
+            }
+            
+            for other in boxes {
+                if other.x == box.x && other.y == box.y { continue }
+                let otherText = other.text.uppercased()
+                var hasBuyerKeyword = false
+                for kw in buyerKeywords {
+                    if otherText.contains(kw) {
+                        hasBuyerKeyword = true
+                        break
+                    }
+                }
+                if !hasBuyerKeyword {
+                    let otherTokens = otherText.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+                    for token in otherTokens {
+                        for kw in buyerKeywords {
+                            let tolerance = (kw.count <= 3) ? 0 : 1
+                            if token.isFuzzyMatch(kw, tolerance: tolerance) {
+                                hasBuyerKeyword = true
+                                break
+                            }
+                        }
+                        if hasBuyerKeyword { break }
+                    }
+                }
+                if !hasBuyerKeyword { continue }
+                
+                let dy = box.y - other.y
+                let dx = box.x - other.x
+                
+                if abs(dy) < Double(medianHeight) * 1.5 && dx > 0 && dx < Double(medianHeight) * 12.0 {
+                    return true
+                }
+                if dy > 0 && dy < Double(medianHeight) * 2.5 && abs(dx) < Double(medianHeight) * 6.0 {
+                    return true
+                }
+            }
+            return false
+        }
         
-        for box in boxes {
+        // Helper checking if a box is a seller CUI/CIF keyword anchor
+        func isSellerAnchor(_ box: OCRBoxItem) -> Bool {
             let upper = box.text.uppercased()
             let noDots = upper.replacingOccurrences(of: ".", with: "")
             let noSpaces = noDots.replacingOccurrences(of: " ", with: "")
             
-            // Skip buyer CUI lines
-            if buyerKeywords.contains(where: { noDots.contains($0) }) { continue }
+            if isBuyerBox(box) { return false }
+            if upper.contains("%") { return false }
+            if noSpaces.hasPrefix("BON") || noDots.contains("BON ") { return false }
             
-            // Skip "BON FISCAL" (poate fi un singur box sau "BON" + "FISCAL" separate)
-            if noSpaces.hasPrefix("BON") || noDots.contains("BON ") { continue }
+            let sellerKeywords = ["CIF", "CUI", "CODFISCAL", "FISCAL", "COD FISCAL"]
             
-            // Match seller CUI patterns
-            let hasSeller = noDots.contains("COD FISCAL") ||
-                            noSpaces.contains("CODFISCAL") ||
-                            noDots.contains("IDENTIFICARE") ||
-                            noSpaces.hasPrefix("CIF") ||
-                            noDots.hasPrefix("CIF") ||
-                            noDots.contains(" CIF")
-            
-            if !hasSeller { continue }
-            
-            // Deduplicate: nu adaugam doua ancore prea apropiate
-            var isDuplicate = false
-            for existing in uniqueAnchors {
-                let dx = abs(existing.x - box.x)
-                let dy = abs(existing.y - box.y)
-                if dx < medianHeight * 5.0 && dy < medianHeight * 3.0 {
-                    isDuplicate = true
-                    print("[CLUSTER] Duplicate anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y)) (prea aproape de o ancora existenta)")
-                    break
+            // Direct containment
+            for kw in sellerKeywords {
+                if noDots.contains(kw) || noSpaces.contains(kw.replacingOccurrences(of: " ", with: "")) {
+                    return true
                 }
             }
             
-            if !isDuplicate {
-                uniqueAnchors.append(box)
-                print("[CLUSTER] NEW anchor #\(uniqueAnchors.count): '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+            // Fuzzy match on tokens
+            let tokens = upper.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+            for token in tokens {
+                for kw in sellerKeywords {
+                    let tolerance = (kw.count <= 3) ? 1 : 2
+                    if token.isFuzzyMatch(kw, tolerance: tolerance) {
+                        return true
+                    }
+                }
+            }
+            
+            // Spatial check (is keyword nearby?)
+            for other in boxes {
+                if other.x == box.x && other.y == box.y { continue }
+                let otherUpper = other.text.uppercased()
+                let otherNoDots = otherUpper.replacingOccurrences(of: ".", with: "")
+                let otherNoSpaces = otherNoDots.replacingOccurrences(of: " ", with: "")
+                
+                var otherHasSellerKeyword = false
+                for kw in sellerKeywords {
+                    if otherNoDots.contains(kw) || otherNoSpaces.contains(kw.replacingOccurrences(of: " ", with: "")) {
+                        otherHasSellerKeyword = true
+                        break
+                    }
+                }
+                
+                if !otherHasSellerKeyword {
+                    let otherTokens = otherUpper.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
+                    for token in otherTokens {
+                        for kw in sellerKeywords {
+                            let tolerance = (kw.count <= 3) ? 1 : 2
+                            if token.isFuzzyMatch(kw, tolerance: tolerance) {
+                                otherHasSellerKeyword = true
+                                break
+                            }
+                        }
+                        if otherHasSellerKeyword { break }
+                    }
+                }
+                
+                if otherHasSellerKeyword {
+                    let dy = abs(box.y - other.y)
+                    let dx = abs(box.x - other.x)
+                    if dy < Double(medianHeight) * 2.0 && dx < Double(medianHeight) * 12.0 {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
+        
+        for box in boxes {
+            if isSellerAnchor(box) {
+                // Deduplicate anchors
+                var isDuplicate = false
+                for existing in uniqueAnchors {
+                    let dx = abs(existing.x - box.x)
+                    let dy = abs(existing.y - box.y)
+                    if dx < medianHeight * 5.0 && dy < medianHeight * 3.0 {
+                        isDuplicate = true
+                        print("[CLUSTER] Duplicate anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y)) (prea aproape de o ancora existenta)")
+                        break
+                    }
+                }
+                
+                if !isDuplicate {
+                    uniqueAnchors.append(box)
+                    print("[CLUSTER] NEW anchor #\(uniqueAnchors.count): '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+                }
             }
         }
         

@@ -33,3 +33,29 @@ When a receipt contains multiple VAT rates (e.g., 9% and 21%), the engine must s
 - [ ] For each receipt, the extracted Seller CUI must match the actual seller, never the buyer CUI.
 - [ ] The total amount and VAT amount/rate must be extracted and associated with the correct receipt.
 - [ ] Receipts with multiple VAT rates must be split into separate rows in the output.
+
+## Follow-up — 2026-07-03T10:03:25Z
+
+Fix the OCR bounding box clustering logic in `VaporServer.swift` to correctly identify and separate multiple receipts from a single image. The current algorithm fails to separate the receipts and merges them into a single invalid result.
+
+Working directory: e:\OCR Iphone\OcrServer
+Integrity mode: development
+
+## Requirements
+
+### R1. Correctly cluster OCR boxes into separate receipts
+The system must identify anchor points (e.g., Seller CUI/CIF keywords) and group the corresponding geometric bounding boxes into distinct clusters, one for each receipt present in the image. We know there are exactly 6 receipts in the user's test image.
+
+### R2. Handle OCR text inaccuracies
+The anchor detection and clustering logic must be robust to common OCR mistakes, such as misread digits or characters in CUI strings (e.g., "R077454P" instead of "RO7745470"), relying more on reliably read keywords (like "COD FISCAL") and spatial relationships.
+
+### R3. Extract financial amounts per cluster
+For each isolated receipt cluster, the system must accurately extract the Total, VAT amount, and Base amount.
+
+## Acceptance Criteria
+
+### Verification Mechanism
+- [ ] Programmatic Mock Test: The agent team must create a Python or Swift mock script (in the scratch directory) that simulates the 6 receipts using roughly accurate relative coordinates and the exact text strings provided in the user's OCR results.
+- [ ] The algorithm must successfully cluster the mock boxes into exactly 6 distinct groups.
+- [ ] The algorithm must extract non-zero, correct Total and VAT amounts for each of the 6 clusters based on the mock data.
+
