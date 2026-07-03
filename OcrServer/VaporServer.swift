@@ -663,58 +663,11 @@ class DocumentDetailsAgent: AccountingAgent {
 class CuiExtractorAgent: AccountingAgent {
     func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
         // Helper checking if a box represents a buyer
-        func isBuyerBox(_ box: OCRBoxItem, medianHeight: CGFloat) -> Bool {
-            let text = box.text.uppercased()
-            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP", "C.N.P"]
-            
+        func isBuyerBox(_ box: OCRBoxItem) -> Bool {
+            let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
+            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
             for kw in buyerKeywords {
-                if text.contains(kw) { return true }
-            }
-            
-            let tokens = text.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
-            for token in tokens {
-                for kw in buyerKeywords {
-                    let tolerance = (kw.count <= 3) ? 0 : 1
-                    if token.isFuzzyMatch(kw, tolerance: tolerance) {
-                        return true
-                    }
-                }
-            }
-            
-            for other in boxes {
-                if other.x == box.x && other.y == box.y { continue }
-                let otherText = other.text.uppercased()
-                var hasBuyerKeyword = false
-                for kw in buyerKeywords {
-                    if otherText.contains(kw) {
-                        hasBuyerKeyword = true
-                        break
-                    }
-                }
-                if !hasBuyerKeyword {
-                    let otherTokens = otherText.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
-                    for token in otherTokens {
-                        for kw in buyerKeywords {
-                            let tolerance = (kw.count <= 3) ? 0 : 1
-                            if token.isFuzzyMatch(kw, tolerance: tolerance) {
-                                hasBuyerKeyword = true
-                                break
-                            }
-                        }
-                        if hasBuyerKeyword { break }
-                    }
-                }
-                if !hasBuyerKeyword { continue }
-                
-                let dy = box.y - other.y
-                let dx = box.x - other.x
-                
-                if abs(dy) < Double(medianHeight) * 1.5 && dx > 0 && dx < Double(medianHeight) * 12.0 {
-                    return true
-                }
-                if dy > 0 && dy < Double(medianHeight) * 2.5 && abs(dx) < Double(medianHeight) * 6.0 {
-                    return true
-                }
+                if cleanText.contains(kw) { return true }
             }
             return false
         }
@@ -729,7 +682,7 @@ class CuiExtractorAgent: AccountingAgent {
         for box in boxes {
             let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
             
-            if isBuyerBox(box, medianHeight: medianHeight) {
+            if isBuyerBox(box) {
                 continue
             }
             
@@ -1409,130 +1362,24 @@ public class AccountingOrchestrator {
         
         var uniqueAnchors: [OCRBoxItem] = []
         
-        // Helper checking if a box represents a buyer
-        func isBuyerBox(_ box: OCRBoxItem) -> Bool {
-            let text = box.text.uppercased()
-            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP", "C.N.P"]
-            
-            for kw in buyerKeywords {
-                if text.contains(kw) { return true }
-            }
-            
-            let tokens = text.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
-            for token in tokens {
-                for kw in buyerKeywords {
-                    let tolerance = (kw.count <= 3) ? 0 : 1
-                    if token.isFuzzyMatch(kw, tolerance: tolerance) {
-                        return true
-                    }
-                }
-            }
-            
-            for other in boxes {
-                if other.x == box.x && other.y == box.y { continue }
-                let otherText = other.text.uppercased()
-                var hasBuyerKeyword = false
-                for kw in buyerKeywords {
-                    if otherText.contains(kw) {
-                        hasBuyerKeyword = true
-                        break
-                    }
-                }
-                if !hasBuyerKeyword {
-                    let otherTokens = otherText.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
-                    for token in otherTokens {
-                        for kw in buyerKeywords {
-                            let tolerance = (kw.count <= 3) ? 0 : 1
-                            if token.isFuzzyMatch(kw, tolerance: tolerance) {
-                                hasBuyerKeyword = true
-                                break
-                            }
-                        }
-                        if hasBuyerKeyword { break }
-                    }
-                }
-                if !hasBuyerKeyword { continue }
-                
-                let dy = box.y - other.y
-                let dx = box.x - other.x
-                
-                if abs(dy) < Double(medianHeight) * 1.5 && dx > 0 && dx < Double(medianHeight) * 12.0 {
-                    return true
-                }
-                if dy > 0 && dy < Double(medianHeight) * 2.5 && abs(dx) < Double(medianHeight) * 6.0 {
-                    return true
-                }
-            }
-            return false
-        }
-        
-        // Helper checking if a box is a seller CUI/CIF keyword anchor
         func isSellerAnchor(_ box: OCRBoxItem) -> Bool {
             let upper = box.text.uppercased()
             let noDots = upper.replacingOccurrences(of: ".", with: "")
             let noSpaces = noDots.replacingOccurrences(of: " ", with: "")
             
-            if isBuyerBox(box) { return false }
+            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
+            for kw in buyerKeywords {
+                if noSpaces.contains(kw) { return false }
+            }
             if upper.contains("%") { return false }
             if noSpaces.hasPrefix("BON") || noDots.contains("BON ") { return false }
             
-            let sellerKeywords = ["CIF", "CUI", "CODFISCAL", "FISCAL", "COD FISCAL"]
-            
-            // Direct containment
+            let sellerKeywords = ["CIF", "CODFISCAL", "IDENTIFICARE"]
             for kw in sellerKeywords {
-                if noDots.contains(kw) || noSpaces.contains(kw.replacingOccurrences(of: " ", with: "")) {
-                    return true
-                }
+                if noSpaces.contains(kw) { return true }
             }
             
-            // Fuzzy match on tokens
-            let tokens = upper.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
-            for token in tokens {
-                for kw in sellerKeywords {
-                    let tolerance = (kw.count <= 3) ? 1 : 2
-                    if token.isFuzzyMatch(kw, tolerance: tolerance) {
-                        return true
-                    }
-                }
-            }
-            
-            // Spatial check (is keyword nearby?)
-            for other in boxes {
-                if other.x == box.x && other.y == box.y { continue }
-                let otherUpper = other.text.uppercased()
-                let otherNoDots = otherUpper.replacingOccurrences(of: ".", with: "")
-                let otherNoSpaces = otherNoDots.replacingOccurrences(of: " ", with: "")
-                
-                var otherHasSellerKeyword = false
-                for kw in sellerKeywords {
-                    if otherNoDots.contains(kw) || otherNoSpaces.contains(kw.replacingOccurrences(of: " ", with: "")) {
-                        otherHasSellerKeyword = true
-                        break
-                    }
-                }
-                
-                if !otherHasSellerKeyword {
-                    let otherTokens = otherUpper.components(separatedBy: CharacterSet.alphanumerics.inverted).filter { !$0.isEmpty }
-                    for token in otherTokens {
-                        for kw in sellerKeywords {
-                            let tolerance = (kw.count <= 3) ? 1 : 2
-                            if token.isFuzzyMatch(kw, tolerance: tolerance) {
-                                otherHasSellerKeyword = true
-                                break
-                            }
-                        }
-                        if otherHasSellerKeyword { break }
-                    }
-                }
-                
-                if otherHasSellerKeyword {
-                    let dy = abs(box.y - other.y)
-                    let dx = abs(box.x - other.x)
-                    if dy < Double(medianHeight) * 2.0 && dx < Double(medianHeight) * 12.0 {
-                        return true
-                    }
-                }
-            }
+            if noSpaces.hasPrefix("COD") && noSpaces.contains("FISCAL") { return true }
             return false
         }
         
