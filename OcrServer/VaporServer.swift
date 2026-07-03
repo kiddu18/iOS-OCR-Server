@@ -641,6 +641,12 @@ class CuiExtractorAgent: AccountingAgent {
         
         for box in boxes {
             let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
+            
+            // Excludem CUI-urile de client (asa cum am facut si la ancore)
+            if cleanText.contains("CLIENT") || cleanText.contains("CUMP") || cleanText.contains("BENEF") || cleanText.contains("CNP") {
+                continue
+            }
+            
             if cuiKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
                 candidateBoxes.append(box)
             }
