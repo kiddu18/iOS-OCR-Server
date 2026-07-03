@@ -338,12 +338,39 @@ actor VaporServer {
             var accountingDataArray: [AccountingResult] = []
             
             if let boxes = result?.boxes, !boxes.isEmpty {
+                print("===== OCR DEBUG =====")
+                print("Total OCR boxes: \(boxes.count)")
+                
+                // Print all boxes that contain CUI-related keywords
+                for box in boxes {
+                    let upper = box.text.uppercased()
+                    if upper.contains("CIF") || upper.contains("CUI") || upper.contains("FISCAL") || upper.contains("RO") {
+                        print("  CUI-box: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y)) w=\(Int(box.w)) h=\(Int(box.h))")
+                    }
+                    if upper.contains("TOTAL") {
+                        print("  TOTAL-box: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+                    }
+                    if upper.contains("TVA") {
+                        print("  TVA-box: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+                    }
+                }
+                
                 let clusters = AccountingOrchestrator.shared.clusterBoxes(boxes)
+                print("Clusters found: \(clusters.count)")
+                for (i, cluster) in clusters.enumerated() {
+                    print("  Cluster \(i): \(cluster.count) boxes")
+                    let clusterText = cluster.prefix(5).map { "'\($0.text)'" }.joined(separator: ", ")
+                    print("    First boxes: \(clusterText)")
+                }
                 
                 for cluster in clusters {
                     let clusterResults = await AccountingOrchestrator.shared.processOcrResult(boxes: cluster, buyerCui: upload.buyer_cui)
+                    print("  -> Produced \(clusterResults.count) results: CUI=\(clusterResults.first?.cui ?? "nil"), Total=\(clusterResults.first?.totalAmount ?? 0), TVA=\(clusterResults.first?.vatAmount ?? 0)")
                     accountingDataArray.append(contentsOf: clusterResults)
                 }
+                
+                print("Total accounting results: \(accountingDataArray.count)")
+                print("===== END DEBUG =====")
                 
                 // Pentru compatibilitate backward, primul element e in accountingData
                 accountingData = accountingDataArray.first
@@ -1255,29 +1282,56 @@ public class AccountingOrchestrator {
         let medianHeight = CGFloat(sortedHeights[sortedHeights.count / 2])
         
         var uniqueAnchors: [OCRBoxItem] = []
-        var uniqueCuis: [String] = []
+        
+        // ANCHOR DETECTION: Folosim CUVINTE CHEIE (nu numere CUI) ca ancore.
+        // OCR-ul citeste mereu corect "COD FISCAL" sau "CIF", dar cifrele le poate strica.
+        let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
         
         for box in boxes {
-            if let cui = isSellerCUIBox(box, in: boxes, medianHeight: medianHeight) {
-                var isDuplicate = false
-                for u in uniqueAnchors {
-                    let dx = abs(u.x - box.x)
-                    let dy = abs(u.y - box.y)
-                    if dx < medianHeight * 5.0 && dy < medianHeight * 2.0 {
-                        isDuplicate = true
-                        break
-                    }
-                }
-                if !isDuplicate {
-                    uniqueAnchors.append(box)
-                    uniqueCuis.append(cui)
+            let upper = box.text.uppercased()
+            let noDots = upper.replacingOccurrences(of: ".", with: "")
+            let noSpaces = noDots.replacingOccurrences(of: " ", with: "")
+            
+            // Skip buyer CUI lines
+            if buyerKeywords.contains(where: { noDots.contains($0) }) { continue }
+            
+            // Skip "BON FISCAL" (poate fi un singur box sau "BON" + "FISCAL" separate)
+            if noSpaces.hasPrefix("BON") || noDots.contains("BON ") { continue }
+            
+            // Match seller CUI patterns
+            let hasSeller = noDots.contains("COD FISCAL") ||
+                            noSpaces.contains("CODFISCAL") ||
+                            noDots.contains("IDENTIFICARE") ||
+                            noSpaces.hasPrefix("CIF") ||
+                            noDots.hasPrefix("CIF") ||
+                            noDots.contains(" CIF")
+            
+            if !hasSeller { continue }
+            
+            // Deduplicate: nu adaugam doua ancore prea apropiate
+            var isDuplicate = false
+            for existing in uniqueAnchors {
+                let dx = abs(existing.x - box.x)
+                let dy = abs(existing.y - box.y)
+                if dx < medianHeight * 5.0 && dy < medianHeight * 3.0 {
+                    isDuplicate = true
+                    print("[CLUSTER] Duplicate anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y)) (prea aproape de o ancora existenta)")
+                    break
                 }
             }
+            
+            if !isDuplicate {
+                uniqueAnchors.append(box)
+                print("[CLUSTER] NEW anchor #\(uniqueAnchors.count): '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+            }
         }
+        
+        print("[CLUSTER] medianHeight=\(medianHeight), total anchors=\(uniqueAnchors.count)")
         
         var clusters: [[OCRBoxItem]] = []
         
         if uniqueAnchors.count > 1 {
+            print("[CLUSTER] Using GRID clustering")
             let sortedByX = uniqueAnchors.sorted { $0.x < $1.x }
             var columns: [[OCRBoxItem]] = []
             for anchor in sortedByX {
