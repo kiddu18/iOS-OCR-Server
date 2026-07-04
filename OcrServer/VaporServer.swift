@@ -1360,6 +1360,28 @@ public class AccountingOrchestrator {
         let sortedHeights = boxes.map { $0.h }.sorted()
         let medianHeight = CGFloat(sortedHeights[sortedHeights.count / 2])
         
+        let debugLogUrl = URL(fileURLWithPath: "e:/OCR Iphone/OcrServer/debug_ocr.txt")
+        func logToFile(_ text: String) {
+            let line = text + "\n"
+            if let data = line.data(using: .utf8) {
+                if FileManager.default.fileExists(atPath: debugLogUrl.path) {
+                    if let fileHandle = try? FileHandle(forWritingTo: debugLogUrl) {
+                        fileHandle.seekToEndOfFile()
+                        fileHandle.write(data)
+                        fileHandle.closeFile()
+                    }
+                } else {
+                    try? data.write(to: debugLogUrl)
+                }
+            }
+        }
+        
+        logToFile("--- START CLUSTER BOXES ---")
+        logToFile("Received \(boxes.count) boxes.")
+        for b in boxes {
+            logToFile("Box: '\(b.text)' at y=\(b.y), x=\(b.x)")
+        }
+        
         var uniqueAnchors: [OCRBoxItem] = []
         
         func isSellerAnchor(_ box: OCRBoxItem) -> Bool {
@@ -1399,98 +1421,54 @@ public class AccountingOrchestrator {
                 
                 if !isDuplicate {
                     uniqueAnchors.append(box)
-                    print("[CLUSTER] NEW anchor #\(uniqueAnchors.count): '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+                    let msg = "[CLUSTER] NEW anchor #\(uniqueAnchors.count): '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))"
+                    print(msg)
+                    logToFile(msg)
                 }
             }
         }
         
-        print("[CLUSTER] medianHeight=\(medianHeight), total anchors=\(uniqueAnchors.count)")
+        let msgTotal = "[CLUSTER] medianHeight=\(medianHeight), total anchors=\(uniqueAnchors.count)"
+        print(msgTotal)
+        logToFile(msgTotal)
         
         var clusters: [[OCRBoxItem]] = []
         
         if uniqueAnchors.count > 1 {
-            print("[CLUSTER] Using GRID clustering")
-            let sortedByX = uniqueAnchors.sorted { $0.x < $1.x }
-            var columns: [[OCRBoxItem]] = []
-            for anchor in sortedByX {
-                if var lastCol = columns.last, let lastAnchor = lastCol.last, CGFloat(anchor.x - lastAnchor.x) < medianHeight * 12.0 {
-                    columns[columns.count - 1].append(anchor)
-                } else {
-                    columns.append([anchor])
-                }
-            }
-            
-            let sortedByY = uniqueAnchors.sorted { $0.y < $1.y }
-            var rows: [[OCRBoxItem]] = []
-            for anchor in sortedByY {
-                if var lastRow = rows.last, let lastAnchor = lastRow.last, CGFloat(anchor.y - lastAnchor.y) < medianHeight * 15.0 {
-                    rows[rows.count - 1].append(anchor)
-                } else {
-                    rows.append([anchor])
-                }
-            }
-            
-            let colX = columns.map { col -> Double in col.map { $0.x }.reduce(0, +) / Double(col.count) }.sorted()
-            let rowY = rows.map { row -> Double in row.map { $0.y }.reduce(0, +) / Double(row.count) }.sorted()
-            
-            var vCuts: [Double] = []
-            if colX.count > 1 {
-                for i in 0..<(colX.count - 1) {
-                    vCuts.append((colX[i] + colX[i+1]) / 2.0)
-                }
-            }
-            
-            var hCuts: [Double] = []
-            if rowY.count > 1 {
-                for i in 0..<(rowY.count - 1) {
-                    hCuts.append((rowY[i] + rowY[i+1]) / 2.0)
-                }
-            }
-            
-            var cellToAnchorIdx: [String: Int] = [:]
-            for (idx, anchor) in uniqueAnchors.enumerated() {
-                var aCol = 0
-                for cut in vCuts {
-                    if anchor.x > cut { aCol += 1 }
-                }
-                var aRow = 0
-                for cut in hCuts {
-                    if anchor.y > cut { aRow += 1 }
-                }
-                cellToAnchorIdx["\(aRow),\(aCol)"] = idx
-            }
+            print("[CLUSTER] Using direct anchor assignment")
+            logToFile("[CLUSTER] Using direct anchor assignment")
             
             var groups: [[OCRBoxItem]] = Array(repeating: [], count: uniqueAnchors.count)
             
             for box in boxes {
-                var bCol = 0
-                for cut in vCuts {
-                    if box.x > cut { bCol += 1 }
-                }
-                var bRow = 0
-                for cut in hCuts {
-                    if box.y > cut { bRow += 1 }
-                }
+                var bestDist: Double = .infinity
+                var bestIdx = 0
                 
-                if let idx = cellToAnchorIdx["\(bRow),\(bCol)"] {
-                    groups[idx].append(box)
-                } else {
-                    var bestDist: Double = .infinity
-                    var bestIdx = 0
-                    for (i, anchor) in uniqueAnchors.enumerated() {
-                        let dx = box.x - anchor.x
-                        let dy = box.y - anchor.y
-                        let dist = dx * dx + dy * dy
-                        if dist < bestDist {
-                            bestDist = dist
-                            bestIdx = i
-                        }
+                for (i, anchor) in uniqueAnchors.enumerated() {
+                    let dx = abs(box.x - anchor.x)
+                    var dy = box.y - anchor.y
+                    
+                    // Box is physically above the anchor (by more than 2 lines) -> extremely unlikely to belong to this receipt
+                    if dy < -Double(medianHeight) * 2.0 {
+                        dy = abs(dy) + 10000.0
+                    } else {
+                        dy = abs(dy)
                     }
-                    groups[bestIdx].append(box)
+                    
+                    // Horizontal distance is much worse than vertical distance (receipts are long vertically)
+                    let dist = dx * 3.0 + dy
+                    if dist < bestDist {
+                        bestDist = dist
+                        bestIdx = i
+                    }
                 }
+                groups[bestIdx].append(box)
             }
             
             clusters = groups
+            for (i, grp) in clusters.enumerated() {
+                logToFile("Cluster \(i) received \(grp.count) boxes")
+            }
         } else {
             clusters = recursiveXYCut(boxes, medianHeight: medianHeight)
         }
