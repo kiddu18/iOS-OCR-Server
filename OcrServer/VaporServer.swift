@@ -274,6 +274,17 @@ actor VaporServer {
             """
             return Self.htmlResponse(html)
         }
+        // GET /debug_boxes - returneaza ultimele box-uri OCR procesate (pentru debug)
+        app.get("debug_boxes") { req -> Response in
+            let res = Response(status: .ok)
+            res.headers.contentType = .json
+            if let data = AccountingOrchestrator.shared.lastBoxesJson {
+                res.body = .init(data: data)
+            } else {
+                res.body = .init(string: "{\"message\": \"No boxes processed yet. Upload an image first.\"}")
+            }
+            return res
+        }
 
         // POST /upload（限制收集本文大小，可自行調整）
         app.on(.POST, "upload", body: .collect(maxSize: "100mb")) { [weak self] req async throws -> Response in
@@ -1385,6 +1396,9 @@ class AccountingValidationAgent: AccountingAgent {
 public class AccountingOrchestrator {
     public static let shared = AccountingOrchestrator()
     
+    // Stocam ultimele box-uri procesate pentru endpoint-ul /debug_boxes
+    public var lastBoxesJson: Data?
+    
     public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil) async -> [AccountingResult] {
         // Generate textBlocks (grouped by lines) for legacy regex usage
         var textBlocks: [String] = []
@@ -1557,17 +1571,17 @@ public class AccountingOrchestrator {
     }
 
     // Separa cutiile de text in documente distincte
-    // UNION-FIND CLUSTERING: Grupeaza box-urile pe baza proximitatii fizice.
-    // Nu depinde de cuvinte cheie, gap-uri, sau layout-ul bonurilor.
-    // Doua texte aproape fizic = acelasi bon. Doua texte departe = bonuri diferite.
-    // Functioneaza indiferent de pozitia, unghiul sau suprapunerea bonurilor.
+    // STRATEGIA: "BON FISCAL" ANCHORS
+    // Fiecare bon fiscal din Romania are textul "BON FISCAL" scris clar la sfarsit.
+    // Il numaram = stim cate bonuri sunt. Il folosim ca ancora pentru fiecare bon.
+    // Fallback: Union-Find cu praguri stranse daca nu gasim "BON FISCAL".
     func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
         guard boxes.count > 1 else { return [boxes] }
         
         let sortedHeights = boxes.map { $0.h }.sorted()
         let medianHeight = Double(sortedHeights[sortedHeights.count / 2])
         
-        // === DUMP JSON pentru debugging ===
+        // === STOCARE PENTRU /debug_boxes ===
         do {
             struct BoxDump: Codable {
                 let text: String; let x: Double; let y: Double; let w: Double; let h: Double
@@ -1576,22 +1590,141 @@ public class AccountingOrchestrator {
             let encoder = JSONEncoder()
             encoder.outputFormatting = .prettyPrinted
             let jsonData = try encoder.encode(dumpBoxes)
-            try jsonData.write(to: URL(fileURLWithPath: "/tmp/ocr_boxes_dump.json"))
-            print("[CLUSTER] Dumped \(boxes.count) boxes to /tmp/ocr_boxes_dump.json")
+            AccountingOrchestrator.shared.lastBoxesJson = jsonData
+            print("[CLUSTER] Stored \(boxes.count) boxes for /debug_boxes endpoint")
         } catch {
-            print("[CLUSTER] Failed to dump boxes: \(error)")
+            print("[CLUSTER] Failed to encode boxes: \(error)")
         }
         
         print("[CLUSTER] === START === boxes=\(boxes.count), medianHeight=\(medianHeight)")
         
-        // === UNION-FIND data structure ===
+        // === PASUL 1: Gaseste toate textele "BON FISCAL" ===
+        var bonFiscalAnchors: [OCRBoxItem] = []
+        
+        for box in boxes {
+            let upper = box.text.uppercased()
+                .replacingOccurrences(of: ".", with: "")
+                .replacingOccurrences(of: " ", with: "")
+            
+            // Cautam "BONFISCAL" dar NU "BONFISCALNR" sau alte prefixe
+            // "BON FISCAL" apare separat, sau "B O N  F I S C A L", etc.
+            if upper.contains("BONFISCAL") || upper.contains("B0NFISCAL") {
+                // Verificam sa nu fie un CIF/CUI line (ex: "COD FISCAL: RO...")
+                if upper.contains("COD") || upper.contains("CIF") || upper.contains("CUI") || upper.contains("IDENTIFICARE") {
+                    continue
+                }
+                bonFiscalAnchors.append(box)
+                print("[CLUSTER] Found 'BON FISCAL' anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+            }
+        }
+        
+        // Deduplicare: daca Apple Vision citeste "BON" si "FISCAL" separat pe acelasi bon,
+        // eliminam duplicatele care sunt foarte aproape
+        var uniqueAnchors: [OCRBoxItem] = []
+        for anchor in bonFiscalAnchors {
+            var isDuplicate = false
+            for existing in uniqueAnchors {
+                let dx = abs(existing.x - anchor.x)
+                let dy = abs(existing.y - anchor.y)
+                if dx < medianHeight * 8.0 && dy < medianHeight * 3.0 {
+                    isDuplicate = true
+                    break
+                }
+            }
+            if !isDuplicate {
+                uniqueAnchors.append(anchor)
+            }
+        }
+        
+        // Daca nu gasim "BON FISCAL", cautam si "BON" izolat (unele bonuri au doar "BON")
+        if uniqueAnchors.count <= 1 {
+            for box in boxes {
+                let upper = box.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                // "BON" izolat (nu "BONBON", nu "BONUS", nu "CARBON")
+                if upper == "BON" || upper == "B O N" {
+                    var isDuplicate = false
+                    for existing in uniqueAnchors {
+                        let dx = abs(existing.x - box.x)
+                        let dy = abs(existing.y - box.y)
+                        if dx < medianHeight * 8.0 && dy < medianHeight * 5.0 {
+                            isDuplicate = true
+                            break
+                        }
+                    }
+                    if !isDuplicate {
+                        uniqueAnchors.append(box)
+                        print("[CLUSTER] Found 'BON' anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
+                    }
+                }
+            }
+        }
+        
+        print("[CLUSTER] Total unique 'BON FISCAL' anchors: \(uniqueAnchors.count)")
+        
+        // === PASUL 2: Daca avem mai multe ancore, asignam box-urile ===
+        if uniqueAnchors.count > 1 {
+            print("[CLUSTER] Using BON FISCAL anchor assignment")
+            
+            var groups: [[OCRBoxItem]] = Array(repeating: [], count: uniqueAnchors.count)
+            
+            for box in boxes {
+                let boxCenterX = box.x + box.w / 2.0
+                let boxCenterY = box.y + box.h / 2.0
+                
+                var bestDist: Double = .infinity
+                var bestIdx = 0
+                
+                for (i, anchor) in uniqueAnchors.enumerated() {
+                    let anchorCenterX = anchor.x + anchor.w / 2.0
+                    let anchorCenterY = anchor.y + anchor.h / 2.0
+                    
+                    // Distanta pe X conteaza MULT mai mult decat pe Y
+                    // (bonurile sunt aranjate in coloane, nu in randuri)
+                    let dx = abs(boxCenterX - anchorCenterX)
+                    let dy = abs(boxCenterY - anchorCenterY)
+                    
+                    // Ponderam X cu 3x fata de Y (bonurile sunt inalte si inguste)
+                    let dist = dx * 3.0 + dy
+                    
+                    if dist < bestDist {
+                        bestDist = dist
+                        bestIdx = i
+                    }
+                }
+                groups[bestIdx].append(box)
+            }
+            
+            var clusters = groups.filter { $0.count >= 3 }
+            if clusters.isEmpty { return [boxes] }
+            
+            clusters.sort {
+                let y0 = $0.map { $0.y }.min() ?? 0
+                let y1 = $1.map { $0.y }.min() ?? 0
+                let x0 = $0.map { $0.x }.min() ?? 0
+                let x1 = $1.map { $0.x }.min() ?? 0
+                if abs(y0 - y1) < medianHeight * 5.0 {
+                    return x0 < x1
+                }
+                return y0 < y1
+            }
+            
+            print("[CLUSTER] === DONE (BON FISCAL) === Returning \(clusters.count) clusters")
+            for (i, c) in clusters.enumerated() {
+                print("[CLUSTER]   Cluster \(i): \(c.count) boxes")
+            }
+            return clusters
+        }
+        
+        // === FALLBACK: Union-Find cu praguri STRANSE ===
+        print("[CLUSTER] Fallback: Union-Find (found \(uniqueAnchors.count) BON FISCAL anchors)")
+        
         var parent = Array(0..<boxes.count)
         var ufRank = Array(repeating: 0, count: boxes.count)
         
         func find(_ x: Int) -> Int {
             var x = x
             while parent[x] != x {
-                parent[x] = parent[parent[x]] // path compression
+                parent[x] = parent[parent[x]]
                 x = parent[x]
             }
             return x
@@ -1605,23 +1738,14 @@ public class AccountingOrchestrator {
             else { parent[rb] = ra; ufRank[ra] += 1 }
         }
         
-        // === Calculam distanta minima intre dreptunghiuri ===
-        // Doua box-uri sunt "vecine" daca distanta dintre ele e sub un prag
-        // Pragul se adapteaza automat la dimensiunea textului (medianHeight)
-        
-        // Pe verticala: liniile consecutive pe un bon sunt la ~1-2x inaltimea textului
-        // Pe orizontala: cuvintele pe aceeasi linie sunt foarte aproape
-        // Intre bonuri diferite: de obicei exista spatiu de cel putin 3-5x inaltimea textului
-        let verticalThreshold = medianHeight * 2.5
-        let horizontalThreshold = medianHeight * 5.0
+        // Praguri MAI STRANSE pentru a evita inlantuirea
+        let verticalThreshold = medianHeight * 1.5
+        let horizontalThreshold = medianHeight * 3.0
         
         for i in 0..<boxes.count {
             let a = boxes[i]
             for j in (i + 1)..<boxes.count {
                 let b = boxes[j]
-                
-                // Distanta minima intre dreptunghiuri pe fiecare axa
-                // Daca se suprapun, distanta = 0
                 let verticalGap = max(0, max(b.y - (a.y + a.h), a.y - (b.y + b.h)))
                 let horizontalGap = max(0, max(b.x - (a.x + a.w), a.x - (b.x + b.w)))
                 
@@ -1631,34 +1755,19 @@ public class AccountingOrchestrator {
             }
         }
         
-        // === Extrage grupurile ===
-        var groups: [Int: [Int]] = [:]
+        var ufGroups: [Int: [Int]] = [:]
         for i in 0..<boxes.count {
             let root = find(i)
-            groups[root, default: []].append(i)
+            ufGroups[root, default: []].append(i)
         }
         
-        var clusters: [[OCRBoxItem]] = groups.values.map { indices in
+        var clusters: [[OCRBoxItem]] = ufGroups.values.map { indices in
             indices.map { boxes[$0] }
         }
         
-        print("[CLUSTER] Union-Find produced \(clusters.count) raw clusters")
-        for (i, c) in clusters.enumerated() {
-            let preview = c.prefix(3).map { "'\($0.text)'" }.joined(separator: ", ")
-            print("[CLUSTER]   Raw cluster \(i): \(c.count) boxes, preview: \(preview)")
-        }
-        
-        // === POST-PROCESSING ===
-        
-        // 1. Filtreaza clustere prea mici (zgomot, text izolat pe fundal)
         clusters = clusters.filter { $0.count >= 3 }
+        if clusters.isEmpty { return [boxes] }
         
-        if clusters.isEmpty {
-            print("[CLUSTER] No valid clusters found, returning all boxes as one")
-            return [boxes]
-        }
-        
-        // 2. Sorteaza: mai intai pe Y (randuri), apoi pe X (coloane)
         clusters.sort {
             let y0 = $0.map { $0.y }.min() ?? 0
             let y1 = $1.map { $0.y }.min() ?? 0
@@ -1670,13 +1779,7 @@ public class AccountingOrchestrator {
             return y0 < y1
         }
         
-        print("[CLUSTER] === DONE === Returning \(clusters.count) clusters")
-        for (i, c) in clusters.enumerated() {
-            let minY = c.map { $0.y }.min() ?? 0
-            let minX = c.map { $0.x }.min() ?? 0
-            print("[CLUSTER]   Final cluster \(i): \(c.count) boxes, topLeft=(\(Int(minX)),\(Int(minY)))")
-        }
-        
+        print("[CLUSTER] === DONE (Union-Find) === Returning \(clusters.count) clusters")
         return clusters
     }
 }
