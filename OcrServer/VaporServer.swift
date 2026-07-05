@@ -590,6 +590,8 @@ public struct AccountingResult: Content {
     
     public var fiscalWarnings: [String] = []
     
+    public var suggestedAccount: String?
+    
     public var globalRequiresManualVerification: Bool {
         return documentTypeRequiresVerification || cuiRequiresVerification || totalRequiresVerification || vatRequiresVerification || !fiscalWarnings.isEmpty
     }
@@ -954,7 +956,7 @@ class FinancialAmountsAgent: AccountingAgent {
                 var amounts: [Double] = []
                 for match in results {
                     let matchedString = nsString.substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(matchedString), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00 {
+                    if let val = Double(matchedString), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00, val != 0.00 {
                         amounts.append(val)
                     }
                 }
@@ -1180,6 +1182,206 @@ class FiscalComplianceAgent: AccountingAgent {
     }
 }
 
+// MARK: - Agent Validare Contabila (Cunostinte Fiscale Romania 2026)
+
+class AccountingValidationAgent: AccountingAgent {
+    // Cote TVA legale Romania 2026
+    static let validVatRates: [Double] = [0, 9, 11, 21]
+    // Cota 9% e doar tranzitorie pentru locuinte noi, expira 31.07.2026
+    
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
+        let fullText = textBlocks.joined(separator: " ").uppercased()
+        
+        // === 1. VALIDARE SI CORECTIE COTE TVA ===
+        correctVatRates(result: &result, fullText: fullText)
+        
+        // === 2. VALIDARE MATEMATICA: Total = Baza + TVA ===
+        validateMathematically(result: &result)
+        
+        // === 3. CATEGORIZARE CHELTUIELI (Cont Contabil Sugerat) ===
+        suggestAccount(result: &result, fullText: fullText)
+        
+        // === 4. AVERTISMENTE SPECIFICE ===
+        addSpecificWarnings(result: &result, fullText: fullText)
+    }
+    
+    // Corectie automata cote TVA vechi -> cote 2026
+    private func correctVatRates(result: inout AccountingResult, fullText: String) {
+        guard let vatPct = result.vatPercentages else { return }
+        
+        // Detecteaza cota veche de 19% -> corectie la 21%
+        if vatPct.contains("19%") {
+            let oldVat = result.vatAmount ?? 0
+            if let total = result.totalAmount, oldVat > 0 {
+                // Recalculeaza cu 21%
+                let newBase = (total / 1.21 * 100).rounded() / 100
+                let newVat = ((total - newBase) * 100).rounded() / 100
+                result.baseAmount = newBase
+                result.vatAmount = newVat
+                result.vatPercentages = "21%"
+                result.fiscalWarnings.append("Corecție automată: Cota TVA 19% (veche) a fost recalculată la 21% (cota 2026). Verificați dacă bonul e din 2025+.")
+            }
+        }
+        
+        // Detecteaza cota veche de 5% -> corectie la 11%
+        if vatPct.contains("5%") && !vatPct.contains("15%") && !vatPct.contains("25%") {
+            if let total = result.totalAmount {
+                let newBase = (total / 1.11 * 100).rounded() / 100
+                let newVat = ((total - newBase) * 100).rounded() / 100
+                result.baseAmount = newBase
+                result.vatAmount = newVat
+                result.vatPercentages = "11%"
+                result.fiscalWarnings.append("Corecție automată: Cota TVA 5% (veche) a fost recalculată la 11% (cota 2026).")
+            }
+        }
+        
+        // Detecteaza cota de 9% pe NON-locuinte -> corectie la 11%
+        // (9% e valid DOAR pentru locuinte noi pana la 31.07.2026)
+        if vatPct == "9%" {
+            let isHousing = fullText.contains("LOCUINT") || fullText.contains("APARTAMENT") || fullText.contains("IMOBIL")
+            if !isHousing {
+                if let total = result.totalAmount {
+                    let newBase = (total / 1.11 * 100).rounded() / 100
+                    let newVat = ((total - newBase) * 100).rounded() / 100
+                    result.baseAmount = newBase
+                    result.vatAmount = newVat
+                    result.vatPercentages = "11%"
+                    result.fiscalWarnings.append("Corecție automată: Cota TVA 9% este valabilă doar pentru locuințe noi (până la 31.07.2026). Recalculat la 11%.")
+                }
+            }
+        }
+    }
+    
+    // Validare: Total = Baza + TVA
+    private func validateMathematically(result: inout AccountingResult) {
+        guard let total = result.totalAmount,
+              let vat = result.vatAmount,
+              let base = result.baseAmount else { return }
+        
+        let expectedTotal = ((base + vat) * 100).rounded() / 100
+        let diff = abs(total - expectedTotal)
+        
+        if diff > 0.02 && diff < total * 0.5 {
+            // Diferenta mica -> probabil eroare OCR pe una din cifre
+            // Recalculeaza baza din total - TVA (totalul e de obicei citit cel mai corect)
+            let correctedBase = ((total - vat) * 100).rounded() / 100
+            if correctedBase > 0 {
+                result.baseAmount = correctedBase
+                result.fiscalWarnings.append(String(format: "Corecție automată: Baza recalculată (%.2f) din Total (%.2f) - TVA (%.2f). Diferență detectată: %.2f RON.", correctedBase, total, vat, diff))
+            }
+        } else if diff >= total * 0.5 {
+            // Diferenta foarte mare -> ceva e fundamental gresit
+            result.fiscalWarnings.append(String(format: "⚠️ Eroare gravă: Total (%.2f) ≠ Bază (%.2f) + TVA (%.2f). Diferență: %.2f RON. Verificare manuală necesară!", total, base, vat, diff))
+            result.totalRequiresVerification = true
+        }
+    }
+    
+    // Categorizare cheltuieli pe baza furnizorului/produselor
+    private func suggestAccount(result: inout AccountingResult, fullText: String) {
+        // Combustibil
+        if fullText.contains("BENZINA") || fullText.contains("MOTORINA") || fullText.contains("DIESEL") ||
+           fullText.contains("GPL") || fullText.contains("CARBURANT") || fullText.contains("MOL ") ||
+           fullText.contains("PETROM") || fullText.contains("OMV") || fullText.contains("ROMPETROL") ||
+           fullText.contains("LUKOIL") || fullText.contains("SOCAR") {
+            result.suggestedAccount = "6022"
+            return
+        }
+        
+        // Utilități (gaz, electricitate, apă)
+        if fullText.contains("GAZ ") || fullText.contains("GAZE") || fullText.contains("MAGISTRAL") ||
+           fullText.contains("ELECTRICA") || fullText.contains("ENEL") || fullText.contains("E.ON") ||
+           fullText.contains("APA ") || fullText.contains("HIDRO") {
+            result.suggestedAccount = "605"
+            return
+        }
+        
+        // Telecomunicații
+        if fullText.contains("VODAFONE") || fullText.contains("ORANGE") || fullText.contains("TELEKOM") ||
+           fullText.contains("DIGI") || fullText.contains("RCS") || fullText.contains("RDS") {
+            result.suggestedAccount = "626"
+            return
+        }
+        
+        // Restaurant / Alimentație
+        if fullText.contains("RESTAURANT") || fullText.contains("PIZZ") || fullText.contains("FAST FOOD") ||
+           fullText.contains("CAFEA") || fullText.contains("COFFEE") || fullText.contains("MENIU") {
+            result.suggestedAccount = "625"
+            return
+        }
+        
+        // Hoteluri / Cazare
+        if fullText.contains("HOTEL") || fullText.contains("CAZARE") || fullText.contains("PENSIUNE") ||
+           fullText.contains("BOOKING") || fullText.contains("ACCOMMODATION") {
+            result.suggestedAccount = "625"
+            return
+        }
+        
+        // Transport
+        if fullText.contains("TAXI") || fullText.contains("UBER") || fullText.contains("BOLT") ||
+           fullText.contains("CFR") || fullText.contains("BILET") || fullText.contains("TRANSPORT") ||
+           fullText.contains("METROREX") || fullText.contains("STB") {
+            result.suggestedAccount = "624"
+            return
+        }
+        
+        // Materiale consumabile / Papetărie
+        if fullText.contains("PAPER") || fullText.contains("HARTIE") || fullText.contains("TONER") ||
+           fullText.contains("CARTUS") || fullText.contains("PAPETARIE") || fullText.contains("BIROU") {
+            result.suggestedAccount = "6028"
+            return
+        }
+        
+        // Magazine generale / Supermarket
+        if fullText.contains("KAUFLAND") || fullText.contains("LIDL") || fullText.contains("MEGA IMAGE") ||
+           fullText.contains("CARREFOUR") || fullText.contains("AUCHAN") || fullText.contains("PROFI") ||
+           fullText.contains("PENNY") || fullText.contains("CORA") {
+            result.suggestedAccount = "604"
+            return
+        }
+        
+        // Cosmetice / Parfumerie
+        if fullText.contains("DOUGLAS") || fullText.contains("SEPHORA") || fullText.contains("COSMET") ||
+           fullText.contains("PARFUM") {
+            result.suggestedAccount = "604"
+            return
+        }
+        
+        // Farmacie / Medicamente
+        if fullText.contains("FARMACI") || fullText.contains("CATENA") || fullText.contains("SENSIBLU") ||
+           fullText.contains("HELPNET") || fullText.contains("DONA") || fullText.contains("MEDICAMENTE") {
+            result.suggestedAccount = "604"
+            return
+        }
+    }
+    
+    // Avertismente specifice per context
+    private func addSpecificWarnings(result: inout AccountingResult, fullText: String) {
+        // Restaurant cu posibilitate de factura mixta (11% mancare + 21% alcool)
+        let isRestaurant = fullText.contains("RESTAURANT") || fullText.contains("PIZZ") || fullText.contains("FAST FOOD") || fullText.contains("CAFEA") || fullText.contains("MENIU")
+        let hasAlcohol = fullText.contains("BERE") || fullText.contains("VIN ") || fullText.contains("WHISKY") || fullText.contains("VODKA") || fullText.contains("COCKTAIL") || fullText.contains("ALCOOL")
+        
+        if isRestaurant && hasAlcohol {
+            result.fiscalWarnings.append("Atenție: Factura de restaurant conține și băuturi alcoolice. TVA-ul poate fi mixt: 11% pentru mâncare, 21% pentru alcool.")
+        }
+        
+        // Bon fiscal fara CUI cumparator -> TVA nedeductibil
+        if result.documentType == "Bon Fiscal" && (result.cui == nil || result.cui?.isEmpty == true) {
+            // Deja tratat in FiscalComplianceAgent, dar adaugam si sugestie
+        }
+        
+        // Verificare data bon — daca e din 2024 sau inainte, cotele vechi erau corecte
+        if let dateStr = result.documentDate {
+            let yearPattern = "20(2[0-4])"
+            if let regex = try? NSRegularExpression(pattern: yearPattern, options: []),
+               regex.firstMatch(in: dateStr, options: [], range: NSRange(location: 0, length: dateStr.utf16.count)) != nil {
+                // Bonul e din 2024 sau mai devreme -> cotele vechi (19%, 9%, 5%) erau corecte
+                // Stergem warning-urile de corectie automata daca exista
+                result.fiscalWarnings = result.fiscalWarnings.filter { !$0.contains("Corecție automată: Cota TVA") }
+            }
+        }
+    }
+}
+
 public class AccountingOrchestrator {
     public static let shared = AccountingOrchestrator()
     
@@ -1217,7 +1419,8 @@ public class AccountingOrchestrator {
             DocumentDetailsAgent(),
             CuiExtractorAgent(),
             FinancialAmountsAgent(),
-            FiscalComplianceAgent(buyerCui: buyerCui)
+            FiscalComplianceAgent(buyerCui: buyerCui),
+            AccountingValidationAgent()
         ]
         
         for agent in agents {
@@ -1354,207 +1557,127 @@ public class AccountingOrchestrator {
     }
 
     // Separa cutiile de text in documente distincte
+    // UNION-FIND CLUSTERING: Grupeaza box-urile pe baza proximitatii fizice.
+    // Nu depinde de cuvinte cheie, gap-uri, sau layout-ul bonurilor.
+    // Doua texte aproape fizic = acelasi bon. Doua texte departe = bonuri diferite.
+    // Functioneaza indiferent de pozitia, unghiul sau suprapunerea bonurilor.
     func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
         guard boxes.count > 1 else { return [boxes] }
         
         let sortedHeights = boxes.map { $0.h }.sorted()
-        let medianHeight = CGFloat(sortedHeights[sortedHeights.count / 2])
+        let medianHeight = Double(sortedHeights[sortedHeights.count / 2])
         
-        let debugLogUrl = URL(fileURLWithPath: "e:/OCR Iphone/OcrServer/debug_ocr.txt")
-        func logToFile(_ text: String) {
-            let line = text + "\n"
-            if let data = line.data(using: .utf8) {
-                if FileManager.default.fileExists(atPath: debugLogUrl.path) {
-                    if let fileHandle = try? FileHandle(forWritingTo: debugLogUrl) {
-                        fileHandle.seekToEndOfFile()
-                        fileHandle.write(data)
-                        fileHandle.closeFile()
-                    }
-                } else {
-                    try? data.write(to: debugLogUrl)
-                }
+        // === DUMP JSON pentru debugging ===
+        do {
+            struct BoxDump: Codable {
+                let text: String; let x: Double; let y: Double; let w: Double; let h: Double
             }
+            let dumpBoxes = boxes.map { BoxDump(text: $0.text, x: $0.x, y: $0.y, w: $0.w, h: $0.h) }
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .prettyPrinted
+            let jsonData = try encoder.encode(dumpBoxes)
+            try jsonData.write(to: URL(fileURLWithPath: "/tmp/ocr_boxes_dump.json"))
+            print("[CLUSTER] Dumped \(boxes.count) boxes to /tmp/ocr_boxes_dump.json")
+        } catch {
+            print("[CLUSTER] Failed to dump boxes: \(error)")
         }
         
-        logToFile("--- START CLUSTER BOXES ---")
-        logToFile("Received \(boxes.count) boxes.")
-        for b in boxes {
-            logToFile("Box: '\(b.text)' at y=\(b.y), x=\(b.x)")
+        print("[CLUSTER] === START === boxes=\(boxes.count), medianHeight=\(medianHeight)")
+        
+        // === UNION-FIND data structure ===
+        var parent = Array(0..<boxes.count)
+        var ufRank = Array(repeating: 0, count: boxes.count)
+        
+        func find(_ x: Int) -> Int {
+            var x = x
+            while parent[x] != x {
+                parent[x] = parent[parent[x]] // path compression
+                x = parent[x]
+            }
+            return x
         }
         
-        var uniqueAnchors: [OCRBoxItem] = []
-        
-        func isSellerAnchor(_ box: OCRBoxItem) -> Bool {
-            let upper = box.text.uppercased()
-            let noDots = upper.replacingOccurrences(of: ".", with: "")
-            let noSpaces = noDots.replacingOccurrences(of: " ", with: "")
-            
-            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
-            for kw in buyerKeywords {
-                if noSpaces.contains(kw) { return false }
-            }
-            if upper.contains("%") { return false }
-            if noSpaces.hasPrefix("BON") || noDots.contains("BON ") { return false }
-            
-            let sellerKeywords = ["CIF", "CODFISCAL", "IDENTIFICARE"]
-            for kw in sellerKeywords {
-                if noSpaces.contains(kw) { return true }
-            }
-            
-            if noSpaces.hasPrefix("COD") && noSpaces.contains("FISCAL") { return true }
-            return false
+        func union(_ a: Int, _ b: Int) {
+            let ra = find(a), rb = find(b)
+            if ra == rb { return }
+            if ufRank[ra] < ufRank[rb] { parent[ra] = rb }
+            else if ufRank[ra] > ufRank[rb] { parent[rb] = ra }
+            else { parent[rb] = ra; ufRank[ra] += 1 }
         }
         
-        for box in boxes {
-            if isSellerAnchor(box) {
-                // Deduplicate anchors
-                var isDuplicate = false
-                for existing in uniqueAnchors {
-                    let dx = abs(existing.x - box.x)
-                    let dy = abs(existing.y - box.y)
-                    if dx < medianHeight * 5.0 && dy < medianHeight * 3.0 {
-                        isDuplicate = true
-                        print("[CLUSTER] Duplicate anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y)) (prea aproape de o ancora existenta)")
-                        break
-                    }
-                }
+        // === Calculam distanta minima intre dreptunghiuri ===
+        // Doua box-uri sunt "vecine" daca distanta dintre ele e sub un prag
+        // Pragul se adapteaza automat la dimensiunea textului (medianHeight)
+        
+        // Pe verticala: liniile consecutive pe un bon sunt la ~1-2x inaltimea textului
+        // Pe orizontala: cuvintele pe aceeasi linie sunt foarte aproape
+        // Intre bonuri diferite: de obicei exista spatiu de cel putin 3-5x inaltimea textului
+        let verticalThreshold = medianHeight * 2.5
+        let horizontalThreshold = medianHeight * 5.0
+        
+        for i in 0..<boxes.count {
+            let a = boxes[i]
+            for j in (i + 1)..<boxes.count {
+                let b = boxes[j]
                 
-                if !isDuplicate {
-                    uniqueAnchors.append(box)
-                    let msg = "[CLUSTER] NEW anchor #\(uniqueAnchors.count): '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))"
-                    print(msg)
-                    logToFile(msg)
-                }
-            }
-        }
-        
-        let msgTotal = "[CLUSTER] medianHeight=\(medianHeight), total anchors=\(uniqueAnchors.count)"
-        print(msgTotal)
-        logToFile(msgTotal)
-        
-        var clusters: [[OCRBoxItem]] = []
-        
-        if uniqueAnchors.count > 1 {
-            print("[CLUSTER] Using direct anchor assignment")
-            logToFile("[CLUSTER] Using direct anchor assignment")
-            
-            var groups: [[OCRBoxItem]] = Array(repeating: [], count: uniqueAnchors.count)
-            
-            for box in boxes {
-                var bestDist: Double = .infinity
-                var bestIdx = 0
+                // Distanta minima intre dreptunghiuri pe fiecare axa
+                // Daca se suprapun, distanta = 0
+                let verticalGap = max(0, max(b.y - (a.y + a.h), a.y - (b.y + b.h)))
+                let horizontalGap = max(0, max(b.x - (a.x + a.w), a.x - (b.x + b.w)))
                 
-                for (i, anchor) in uniqueAnchors.enumerated() {
-                    let dx = abs(box.x - anchor.x)
-                    var dy = box.y - anchor.y
-                    
-                    // Box is physically above the anchor (by more than 2 lines) -> extremely unlikely to belong to this receipt
-                    if dy < -Double(medianHeight) * 2.0 {
-                        dy = abs(dy) + 10000.0
-                    } else {
-                        dy = abs(dy)
-                    }
-                    
-                    // Horizontal distance is much worse than vertical distance (receipts are long vertically)
-                    let dist = dx * 3.0 + dy
-                    if dist < bestDist {
-                        bestDist = dist
-                        bestIdx = i
-                    }
+                if verticalGap < verticalThreshold && horizontalGap < horizontalThreshold {
+                    union(i, j)
                 }
-                groups[bestIdx].append(box)
             }
-            
-            clusters = groups
-            for (i, grp) in clusters.enumerated() {
-                logToFile("Cluster \(i) received \(grp.count) boxes")
-            }
-        } else {
-            clusters = recursiveXYCut(boxes, medianHeight: medianHeight)
         }
         
+        // === Extrage grupurile ===
+        var groups: [Int: [Int]] = [:]
+        for i in 0..<boxes.count {
+            let root = find(i)
+            groups[root, default: []].append(i)
+        }
+        
+        var clusters: [[OCRBoxItem]] = groups.values.map { indices in
+            indices.map { boxes[$0] }
+        }
+        
+        print("[CLUSTER] Union-Find produced \(clusters.count) raw clusters")
+        for (i, c) in clusters.enumerated() {
+            let preview = c.prefix(3).map { "'\($0.text)'" }.joined(separator: ", ")
+            print("[CLUSTER]   Raw cluster \(i): \(c.count) boxes, preview: \(preview)")
+        }
+        
+        // === POST-PROCESSING ===
+        
+        // 1. Filtreaza clustere prea mici (zgomot, text izolat pe fundal)
         clusters = clusters.filter { $0.count >= 3 }
-        if clusters.isEmpty { return [boxes] }
         
-        return clusters.sorted {
-            if abs($0[0].y - $1[0].y) < Double(medianHeight) * 5.0 {
-                return $0[0].x < $1[0].x
-            }
-            return $0[0].y < $1[0].y
-        }
-    }
-    
-    private func recursiveXYCut(_ boxes: [OCRBoxItem], medianHeight: CGFloat) -> [[OCRBoxItem]] {
-        guard boxes.count > 1 else { return [boxes] }
-        
-        // 1. Tăietură pe X (cautam o coloana complet goala intre bonuri)
-        let sortedX = boxes.sorted { $0.x < $1.x }
-        var xIntervals: [(min: CGFloat, max: CGFloat)] = []
-        
-        for b in sortedX {
-            if xIntervals.isEmpty {
-                xIntervals.append((b.x, b.x + b.w))
-            } else {
-                let lastIdx = xIntervals.count - 1
-                // Permitem o toleranță (daca un text centrat acopera gaura, intervalele se unesc)
-                if b.x <= xIntervals[lastIdx].max + medianHeight * 2.5 {
-                    xIntervals[lastIdx].max = max(xIntervals[lastIdx].max, b.x + b.w)
-                } else {
-                    xIntervals.append((b.x, b.x + b.w))
-                }
-            }
+        if clusters.isEmpty {
+            print("[CLUSTER] No valid clusters found, returning all boxes as one")
+            return [boxes]
         }
         
-        if xIntervals.count > 1 {
-            var groups: [[OCRBoxItem]] = Array(repeating: [], count: xIntervals.count)
-            for b in boxes {
-                for (i, interval) in xIntervals.enumerated() {
-                    if b.x >= interval.min - medianHeight && (b.x + b.w) <= interval.max + medianHeight {
-                        groups[i].append(b)
-                        break
-                    }
-                }
+        // 2. Sorteaza: mai intai pe Y (randuri), apoi pe X (coloane)
+        clusters.sort {
+            let y0 = $0.map { $0.y }.min() ?? 0
+            let y1 = $1.map { $0.y }.min() ?? 0
+            let x0 = $0.map { $0.x }.min() ?? 0
+            let x1 = $1.map { $0.x }.min() ?? 0
+            if abs(y0 - y1) < medianHeight * 5.0 {
+                return x0 < x1
             }
-            let validGroups = groups.filter { !$0.isEmpty }
-            if validGroups.count > 1 {
-                return validGroups.flatMap { recursiveXYCut($0, medianHeight: medianHeight) }
-            }
+            return y0 < y1
         }
         
-        // 2. Tăietură pe Y (cautam un rand complet gol intre bonuri, pe verticala)
-        let sortedY = boxes.sorted { $0.y < $1.y }
-        var yIntervals: [(min: CGFloat, max: CGFloat)] = []
-        
-        for b in sortedY {
-            if yIntervals.isEmpty {
-                yIntervals.append((b.y, b.y + b.h))
-            } else {
-                let lastIdx = yIntervals.count - 1
-                if b.y <= yIntervals[lastIdx].max + medianHeight * 3.5 {
-                    yIntervals[lastIdx].max = max(yIntervals[lastIdx].max, b.y + b.h)
-                } else {
-                    yIntervals.append((b.y, b.y + b.h))
-                }
-            }
+        print("[CLUSTER] === DONE === Returning \(clusters.count) clusters")
+        for (i, c) in clusters.enumerated() {
+            let minY = c.map { $0.y }.min() ?? 0
+            let minX = c.map { $0.x }.min() ?? 0
+            print("[CLUSTER]   Final cluster \(i): \(c.count) boxes, topLeft=(\(Int(minX)),\(Int(minY)))")
         }
         
-        if yIntervals.count > 1 {
-            var groups: [[OCRBoxItem]] = Array(repeating: [], count: yIntervals.count)
-            for b in boxes {
-                for (i, interval) in yIntervals.enumerated() {
-                    if b.y >= interval.min - medianHeight && (b.y + b.h) <= interval.max + medianHeight {
-                        groups[i].append(b)
-                        break
-                    }
-                }
-            }
-            let validGroups = groups.filter { !$0.isEmpty }
-            if validGroups.count > 1 {
-                return validGroups.flatMap { recursiveXYCut($0, medianHeight: medianHeight) }
-            }
-        }
-        
-        return [boxes]
+        return clusters
     }
 }
 
