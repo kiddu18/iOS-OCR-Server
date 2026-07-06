@@ -1571,10 +1571,11 @@ public class AccountingOrchestrator {
     }
 
     // Separa cutiile de text in documente distincte
-    // STRATEGIA: "BON FISCAL" ANCHORS
-    // Fiecare bon fiscal din Romania are textul "BON FISCAL" scris clar la sfarsit.
-    // Il numaram = stim cate bonuri sunt. Il folosim ca ancora pentru fiecare bon.
-    // Fallback: Union-Find cu praguri stranse daca nu gasim "BON FISCAL".
+    // STRATEGIA CASCADA (robust pentru orice tip de imagine/PDF):
+    //   Nivel 1: CUI anchors (COD FISCAL / Cod Identificare Fiscala / CIF standalone)
+    //   Nivel 2: BON FISCAL anchors (fallback daca OCR nu detecteaza CUI)
+    //   Nivel 3: Union-Find spatial proximity (fallback final pentru imagini fara text fiscal)
+    // Dupa fiecare nivel: Pass 2 split daca un cluster contine mai multe CUI-uri
     func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
         guard boxes.count > 1 else { return [boxes] }
         
@@ -1591,101 +1592,53 @@ public class AccountingOrchestrator {
             encoder.outputFormatting = .prettyPrinted
             let jsonData = try encoder.encode(dumpBoxes)
             AccountingOrchestrator.shared.lastBoxesJson = jsonData
-            print("[CLUSTER] Stored \(boxes.count) boxes for /debug_boxes endpoint")
-        } catch {
-            print("[CLUSTER] Failed to encode boxes: \(error)")
-        }
+        } catch {}
         
         print("[CLUSTER] === START === boxes=\(boxes.count), medianHeight=\(medianHeight)")
         
-        // === PASUL 1: Gaseste toate textele "BON FISCAL" ===
-        var bonFiscalAnchors: [OCRBoxItem] = []
+        // =====================================================================
+        // HELPER FUNCTIONS
+        // =====================================================================
         
-        for box in boxes {
-            let upper = box.text.uppercased()
-                .replacingOccurrences(of: ".", with: "")
-                .replacingOccurrences(of: " ", with: "")
-            
-            // Cautam "BONFISCAL" dar NU "BONFISCALNR" sau alte prefixe
-            // "BON FISCAL" apare separat, sau "B O N  F I S C A L", etc.
-            if upper.contains("BONFISCAL") || upper.contains("B0NFISCAL") {
-                // Verificam sa nu fie un CIF/CUI line (ex: "COD FISCAL: RO...")
-                if upper.contains("COD") || upper.contains("CIF") || upper.contains("CUI") || upper.contains("IDENTIFICARE") {
-                    continue
-                }
-                bonFiscalAnchors.append(box)
-                print("[CLUSTER] Found 'BON FISCAL' anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
-            }
+        func isBuyerText(_ text: String) -> Bool {
+            let t = text.uppercased()
+            return t.contains("CLIENT") || t.contains("CUMP") || t.contains("BENEF") || t.contains("CNP")
         }
         
-        // Deduplicare: daca Apple Vision citeste "BON" si "FISCAL" separat pe acelasi bon,
-        // eliminam duplicatele care sunt foarte aproape
-        var uniqueAnchors: [OCRBoxItem] = []
-        for anchor in bonFiscalAnchors {
-            var isDuplicate = false
-            for existing in uniqueAnchors {
-                let dx = abs(existing.x - anchor.x)
-                let dy = abs(existing.y - anchor.y)
-                if dx < medianHeight * 8.0 && dy < medianHeight * 3.0 {
-                    isDuplicate = true
-                    break
-                }
-            }
-            if !isDuplicate {
-                uniqueAnchors.append(anchor)
-            }
-        }
-        
-        // Daca nu gasim "BON FISCAL", cautam si "BON" izolat (unele bonuri au doar "BON")
-        if uniqueAnchors.count <= 1 {
-            for box in boxes {
-                let upper = box.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-                // "BON" izolat (nu "BONBON", nu "BONUS", nu "CARBON")
-                if upper == "BON" || upper == "B O N" {
-                    var isDuplicate = false
-                    for existing in uniqueAnchors {
-                        let dx = abs(existing.x - box.x)
-                        let dy = abs(existing.y - box.y)
-                        if dx < medianHeight * 8.0 && dy < medianHeight * 5.0 {
-                            isDuplicate = true
-                            break
-                        }
-                    }
-                    if !isDuplicate {
-                        uniqueAnchors.append(box)
-                        print("[CLUSTER] Found 'BON' anchor: '\(box.text)' at x=\(Int(box.x)) y=\(Int(box.y))")
-                    }
-                }
-            }
-        }
-        
-        print("[CLUSTER] Total unique 'BON FISCAL' anchors: \(uniqueAnchors.count)")
-        
-        // === PASUL 2: Daca avem mai multe ancore, asignam box-urile ===
-        if uniqueAnchors.count > 1 {
-            print("[CLUSTER] Using BON FISCAL anchor assignment")
-            
-            var groups: [[OCRBoxItem]] = Array(repeating: [], count: uniqueAnchors.count)
-            
-            for box in boxes {
-                let boxCenterX = box.x + box.w / 2.0
-                let boxCenterY = box.y + box.h / 2.0
+        func assignBoxes(_ bxs: [OCRBoxItem], anchors: [OCRBoxItem]) -> [[OCRBoxItem]] {
+            var improvedPositions: [(Double, Double)] = []
+            for anchor in anchors {
+                let ax = anchor.x + anchor.w / 2.0
+                let ay = anchor.y + anchor.h / 2.0
                 
+                // Cautam box-uri fix deasupra (header = nume firma) pentru a gasi un centroid mai bun
+                var headerBoxes: [OCRBoxItem] = []
+                // Folosim 'boxes' global ca sa gasim header-ul chiar si la sub-splitari
+                for b in boxes {
+                    let bx = b.x + b.w / 2.0
+                    let by = b.y + b.h / 2.0
+                    if by < ay && abs(bx - ax) < medianHeight * 2.5 && (ay - by) < medianHeight * 3.5 {
+                        headerBoxes.append(b)
+                    }
+                }
+                
+                var improvedY = ay
+                if !headerBoxes.isEmpty {
+                    let topY = headerBoxes.map { $0.y + $0.h / 2.0 }.min() ?? ay
+                    improvedY = (topY + ay) / 2.0
+                }
+                improvedPositions.append((ax, improvedY))
+            }
+            
+            var groups: [[OCRBoxItem]] = Array(repeating: [], count: anchors.count)
+            for box in bxs {
+                let bx = box.x + box.w / 2.0
+                let by = box.y + box.h / 2.0
                 var bestDist: Double = .infinity
                 var bestIdx = 0
-                
-                for (i, anchor) in uniqueAnchors.enumerated() {
-                    let anchorCenterX = anchor.x + anchor.w / 2.0
-                    let anchorCenterY = anchor.y + anchor.h / 2.0
-                    
-                    // Distanta pe X conteaza MULT mai mult decat pe Y
-                    // (bonurile sunt aranjate in coloane, nu in randuri)
-                    let dx = abs(boxCenterX - anchorCenterX)
-                    let dy = abs(boxCenterY - anchorCenterY)
-                    
-                    // Ponderam X cu 3x fata de Y (bonurile sunt inalte si inguste)
-                    let dist = dx * 3.0 + dy
-                    
+                for (i, pos) in improvedPositions.enumerated() {
+                    // Y (coloana) conteaza 3x mai mult decat X (pozitia pe bon)
+                    let dist = abs(by - pos.1) * 3.0 + abs(bx - pos.0)
                     if dist < bestDist {
                         bestDist = dist
                         bestIdx = i
@@ -1693,30 +1646,219 @@ public class AccountingOrchestrator {
                 }
                 groups[bestIdx].append(box)
             }
-            
-            var clusters = groups.filter { $0.count >= 3 }
-            if clusters.isEmpty { return [boxes] }
-            
+            return groups
+        }
+        
+        // Pass 2: Split orice cluster cu mai multe CUI-uri de vanzator
+        func splitMultiCuiClusters(_ clusters: [[OCRBoxItem]]) -> [[OCRBoxItem]] {
+            var result: [[OCRBoxItem]] = []
+            for cluster in clusters {
+                if cluster.count < 3 { continue }
+                
+                var sellerCuiAnchors: [OCRBoxItem] = []
+                for box in cluster {
+                    if isBuyerText(box.text) { continue }
+                    let upper = box.text.uppercased()
+                        .replacingOccurrences(of: " ", with: "")
+                        .replacingOccurrences(of: ".", with: "")
+                    if upper.contains("CODFISCAL") || upper.contains("CODIDENTIFICARE") || upper.contains("IDENTIFICAREFISCALA") {
+                        let numbersOnly = box.text.filter { $0.isNumber }
+                        if numbersOnly.count >= 5 {
+                            var dup = false
+                            for e in sellerCuiAnchors {
+                                if abs(e.x - box.x) < medianHeight * 3 && abs(e.y - box.y) < medianHeight * 2 {
+                                    dup = true; break
+                                }
+                            }
+                            if !dup { sellerCuiAnchors.append(box) }
+                        }
+                    }
+                }
+                
+                if sellerCuiAnchors.count > 1 {
+                    print("[CLUSTER] Pass2: Splitting cluster (\(cluster.count) boxes) with \(sellerCuiAnchors.count) CUIs")
+                    let subClusters = assignBoxes(cluster, anchors: sellerCuiAnchors)
+                    for sc in subClusters {
+                        if sc.count >= 3 { result.append(sc) }
+                    }
+                } else {
+                    result.append(cluster)
+                }
+            }
+            return result
+        }
+        
+        // Sortare finala: pe Y apoi pe X
+        func sortClusters(_ clusters: inout [[OCRBoxItem]]) {
             clusters.sort {
                 let y0 = $0.map { $0.y }.min() ?? 0
                 let y1 = $1.map { $0.y }.min() ?? 0
                 let x0 = $0.map { $0.x }.min() ?? 0
                 let x1 = $1.map { $0.x }.min() ?? 0
-                if abs(y0 - y1) < medianHeight * 5.0 {
-                    return x0 < x1
-                }
+                if abs(y0 - y1) < medianHeight * 5.0 { return x0 < x1 }
                 return y0 < y1
             }
-            
-            print("[CLUSTER] === DONE (BON FISCAL) === Returning \(clusters.count) clusters")
-            for (i, c) in clusters.enumerated() {
-                print("[CLUSTER]   Cluster \(i): \(c.count) boxes")
-            }
-            return clusters
         }
         
-        // === FALLBACK: Union-Find cu praguri STRANSE ===
-        print("[CLUSTER] Fallback: Union-Find (found \(uniqueAnchors.count) BON FISCAL anchors)")
+        func logResult(_ label: String, _ clusters: [[OCRBoxItem]]) {
+            print("[CLUSTER] === DONE (\(label)) === Returning \(clusters.count) clusters")
+            for (i, c) in clusters.enumerated() {
+                let minY = c.map { $0.y }.min() ?? 0
+                let minX = c.map { $0.x }.min() ?? 0
+                print("[CLUSTER]   Cluster \(i): \(c.count) boxes, topLeft=(\(Int(minX)),\(Int(minY)))")
+            }
+        }
+        
+        // =====================================================================
+        // NIVEL 1: CUI ANCHORS
+        // Cel mai fiabil pentru bonuri fiscale romanesti (fiecare bon are un CUI)
+        // =====================================================================
+        
+        var cuiAnchors: [OCRBoxItem] = []
+        
+        // 1a. Box-uri cu "COD FISCAL" / "Cod Identificare Fiscala" care contin un numar
+        for box in boxes {
+            if isBuyerText(box.text) { continue }
+            let upper = box.text.uppercased()
+                .replacingOccurrences(of: " ", with: "")
+                .replacingOccurrences(of: ".", with: "")
+            if upper.contains("CODFISCAL") || upper.contains("CODIDENTIFICARE") || upper.contains("IDENTIFICAREFISCALA") {
+                let numbersOnly = box.text.filter { $0.isNumber }
+                if numbersOnly.count >= 5 {
+                    var dup = false
+                    for e in cuiAnchors {
+                        if abs(e.x - box.x) < medianHeight * 3 && abs(e.y - box.y) < medianHeight * 2 {
+                            dup = true; break
+                        }
+                    }
+                    if !dup {
+                        cuiAnchors.append(box)
+                        print("[CLUSTER] L1 CUI anchor: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
+                    }
+                }
+            }
+        }
+        
+        // 1b. "CIF" standalone (pt bonuri unde CIF e separat de numar)
+        for box in boxes {
+            if isBuyerText(box.text) { continue }
+            let trimmed = box.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: ".", with: "")
+            if trimmed == "CIF" || trimmed == "C I F" || trimmed == "CIF:" {
+                for box2 in boxes {
+                    if abs(box2.x - box.x) < medianHeight * 2 {
+                        let hasLongNumber = box2.text.replacingOccurrences(of: " ", with: "")
+                            .filter { $0.isNumber }.count >= 7
+                        if hasLongNumber {
+                            var dup = false
+                            for e in cuiAnchors {
+                                if abs(e.x - box.x) < medianHeight * 3 && abs(e.y - box.y) < medianHeight * 2 {
+                                    dup = true; break
+                                }
+                            }
+                            if !dup {
+                                cuiAnchors.append(box)
+                                print("[CLUSTER] L1 CIF standalone: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        
+        print("[CLUSTER] L1: \(cuiAnchors.count) CUI anchors found")
+        
+        if cuiAnchors.count > 1 {
+            var clusters = assignBoxes(boxes, anchors: cuiAnchors)
+            clusters = clusters.filter { $0.count >= 3 }
+            if !clusters.isEmpty {
+                var result = splitMultiCuiClusters(clusters)
+                if !result.isEmpty {
+                    sortClusters(&result)
+                    logResult("CUI anchors", result)
+                    return result
+                }
+            }
+        }
+        
+        // =====================================================================
+        // NIVEL 2: BON FISCAL ANCHORS
+        // Fallback daca CUI nu e detectabil (OCR slab, format non-standard)
+        // Fiecare bon fiscal romanesc are textul "BON FISCAL" la sfarsit
+        // =====================================================================
+        
+        print("[CLUSTER] L2: Trying BON FISCAL anchors...")
+        var bonAnchors: [OCRBoxItem] = []
+        
+        // 2a. BON FISCAL in text (nu NUMAR BON FISCAL, nu COD FISCAL)
+        for box in boxes {
+            let upper = box.text.uppercased()
+                .replacingOccurrences(of: ".", with: "")
+                .replacingOccurrences(of: " ", with: "")
+            if upper.contains("BONFISCAL") || upper.contains("B0NFISCAL") {
+                if upper.hasPrefix("NUMAR") { continue }
+                if upper.contains("COD") || upper.contains("CIF") || upper.contains("CUI") || upper.contains("IDENTIFICARE") { continue }
+                var dup = false
+                for e in bonAnchors {
+                    if abs(e.x - box.x) < medianHeight * 8 && abs(e.y - box.y) < medianHeight * 3 {
+                        dup = true; break
+                    }
+                }
+                if !dup {
+                    bonAnchors.append(box)
+                    print("[CLUSTER] L2 BON anchor: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
+                }
+            }
+        }
+        
+        // 2b. "BON" + "FISCAL" in box-uri separate dar apropiate
+        for box in boxes {
+            let upper = box.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            if upper == "BON" || upper == "B O N" {
+                for box2 in boxes {
+                    let u2 = box2.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                    if u2 == "FISCAL" || u2 == "F I S C A L" {
+                        if abs(box.x - box2.x) < medianHeight * 3 && abs(box.y - box2.y) < medianHeight * 3 {
+                            var dup = false
+                            for e in bonAnchors {
+                                if abs(e.x - box.x) < medianHeight * 8 && abs(e.y - box.y) < medianHeight * 5 {
+                                    dup = true; break
+                                }
+                            }
+                            if !dup {
+                                bonAnchors.append(box)
+                                print("[CLUSTER] L2 BON split: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+        }
+        
+        print("[CLUSTER] L2: \(bonAnchors.count) BON FISCAL anchors found")
+        
+        if bonAnchors.count > 1 {
+            var clusters = assignBoxes(boxes, anchors: bonAnchors)
+            clusters = clusters.filter { $0.count >= 3 }
+            if !clusters.isEmpty {
+                var result = splitMultiCuiClusters(clusters)
+                if !result.isEmpty {
+                    sortClusters(&result)
+                    logResult("BON FISCAL anchors", result)
+                    return result
+                }
+            }
+        }
+        
+        // =====================================================================
+        // NIVEL 3: UNION-FIND SPATIAL PROXIMITY
+        // Fallback final: grupeaza box-urile bazat pe proximitate fizica
+        // Util pentru: imagini fara text fiscal clar, bonuri ne-romanesti, PDF-uri
+        // =====================================================================
+        
+        print("[CLUSTER] L3: Trying Union-Find spatial proximity...")
         
         var parent = Array(0..<boxes.count)
         var ufRank = Array(repeating: 0, count: boxes.count)
@@ -1738,7 +1880,7 @@ public class AccountingOrchestrator {
             else { parent[rb] = ra; ufRank[ra] += 1 }
         }
         
-        // Praguri MAI STRANSE pentru a evita inlantuirea
+        // Praguri bazate pe medianHeight - calibrate sa nu inlantuiasca bonuri diferite
         let verticalThreshold = medianHeight * 1.5
         let horizontalThreshold = medianHeight * 3.0
         
@@ -1766,21 +1908,19 @@ public class AccountingOrchestrator {
         }
         
         clusters = clusters.filter { $0.count >= 3 }
-        if clusters.isEmpty { return [boxes] }
         
-        clusters.sort {
-            let y0 = $0.map { $0.y }.min() ?? 0
-            let y1 = $1.map { $0.y }.min() ?? 0
-            let x0 = $0.map { $0.x }.min() ?? 0
-            let x1 = $1.map { $0.x }.min() ?? 0
-            if abs(y0 - y1) < medianHeight * 5.0 {
-                return x0 < x1
+        if clusters.count > 1 {
+            var result = splitMultiCuiClusters(clusters)
+            if !result.isEmpty {
+                sortClusters(&result)
+                logResult("Union-Find", result)
+                return result
             }
-            return y0 < y1
         }
         
-        print("[CLUSTER] === DONE (Union-Find) === Returning \(clusters.count) clusters")
-        return clusters
+        // Nimic nu a functionat - returnez tot ca un singur cluster
+        print("[CLUSTER] === DONE === No splitting possible, returning all as 1 cluster")
+        return [boxes]
     }
 }
 
