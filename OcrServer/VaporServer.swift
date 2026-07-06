@@ -688,27 +688,25 @@ class CuiExtractorAgent: AccountingAgent {
         let sortedHeights = boxes.map { $0.h }.sorted()
         let medianHeight = sortedHeights.isEmpty ? 15.0 : CGFloat(sortedHeights[sortedHeights.count / 2])
 
-        // 1. Cautare Spatiala Inteligenta 2D (Fuzzy)
-        let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "RO"]
+        // 1. Cautare pe baza de Keywords
+        let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "RO", "R0", "IDENTIFICARE"]
         var candidateBoxes: [OCRBoxItem] = []
         
         for box in boxes {
             let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
-            
-            if isBuyerBox(box) {
-                continue
-            }
+            if isBuyerBox(box) { continue }
             
             if cuiKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
                 candidateBoxes.append(box)
             }
         }
         
-        // Verificam textul din interiorul cutiilor gasite (poate CUI-ul e in aceeasi cutie: "CIF RO123456")
+        // A. Cautam CUI-uri perfect valide (trec checksum-ul)
+        // Verificam textul din interiorul cutiilor gasite
         for box in candidateBoxes {
             if box.text.contains("%") { continue }
             let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-            let numbersOnly = text.filter { $0.isNumber }
+            let numbersOnly = String(text.filter { $0.isNumber })
             if isValidCUI(cui: numbersOnly) {
                 result.cui = numbersOnly
                 result.cuiRequiresVerification = false
@@ -718,10 +716,10 @@ class CuiExtractorAgent: AccountingAgent {
             }
         }
         
-        // Cautam cutii la dreapta sau putin mai jos
+        // Cautam cutii vecine
         for keywordBox in candidateBoxes {
             let nearbyBoxes = boxes.filter {
-                ($0.x != keywordBox.x || $0.y != keywordBox.y) && // exclude self
+                ($0.x != keywordBox.x || $0.y != keywordBox.y) &&
                 $0.y >= keywordBox.y - keywordBox.h * 0.8 && $0.y <= keywordBox.y + keywordBox.h * 2.0 &&
                 $0.x >= keywordBox.x - keywordBox.w * 0.5
             }.sorted { $0.x < $1.x }
@@ -729,8 +727,8 @@ class CuiExtractorAgent: AccountingAgent {
             for nb in nearbyBoxes {
                 if nb.text.contains("%") { continue }
                 let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-                let numbersOnly = text.filter { $0.isNumber }
-                if !numbersOnly.isEmpty && isValidCUI(cui: numbersOnly) {
+                let numbersOnly = String(text.filter { $0.isNumber })
+                if isValidCUI(cui: numbersOnly) {
                     result.cui = numbersOnly
                     result.cuiRequiresVerification = false
                     await verifyWithANAF(cui: numbersOnly, result: &result)
@@ -740,83 +738,44 @@ class CuiExtractorAgent: AccountingAgent {
             }
         }
         
-        // 2. Fallback la Regex-ul clasic
-        let fullText = textBlocks.joined(separator: " ").uppercased()
-        let fallbackPattern = "\\b([0-9]{2,10})\\b"
-        if let regex = try? NSRegularExpression(pattern: fallbackPattern, options: []) {
-            let nsString = fullText as NSString
-            let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
-            
-            for match in results {
-                if match.numberOfRanges > 1 {
-                    let cuiCandidate = nsString.substring(with: match.range(at: 1))
-                    if isValidCUI(cui: cuiCandidate) {
-                        result.cui = cuiCandidate
-                        result.cuiRequiresVerification = false
-                        await verifyWithANAF(cui: cuiCandidate, result: &result)
-                        result.cui = cuiCandidate
-                        return
-                    }
-                }
-            }
-        }
-        
-        // 3. Fallback: extractia de secvente alfanumerice din vecinatate (lungime 2-12)
-        print("[CUI Extraction] No mathematically valid CUI found. Attempting fallback for inaccurate OCR...")
-        
-        func cleanCandidate(_ rawText: String) -> String? {
-            var s = String(rawText.uppercased().filter { $0.isLetter || $0.isNumber })
-            let prefixes = ["CIF", "CUI", "RO", "R0", "COD", "FISCAL", "CODFISCAL"]
-            var changed = true
-            while changed {
-                changed = false
-                for prefix in prefixes {
-                    if s.hasPrefix(prefix) {
-                        s = String(s.dropFirst(prefix.count))
-                        changed = true
-                    }
-                }
-            }
-            if s.count >= 2 && s.count <= 12 && s.contains(where: { $0.isNumber }) {
-                return s
-            }
-            return nil
-        }
-        
-        var fallbackCandidates: [(text: String, distance: Double)] = []
+        // B. Fallback OCR (nu trec checksum-ul din cauza erorilor ex: "R0774547?" missing a zero)
+        print("[CUI Extraction] No mathematically valid CUI found. Attempting OCR fallback for keyword candidates...")
         
         for box in candidateBoxes {
-            if let cleaned = cleanCandidate(box.text) {
-                fallbackCandidates.append((text: cleaned, distance: 0.0))
+            if box.text.contains("%") { continue }
+            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+            let numbersOnly = String(text.filter { $0.isNumber })
+            // Un CUI are intre 2 si 10 cifre. Daca avem 5+ cifre langa "CUI"/"RO", cel mai probabil e el.
+            if numbersOnly.count >= 5 && numbersOnly.count <= 10 {
+                result.cui = numbersOnly
+                result.cuiRequiresVerification = true
+                print("[CUI Extraction] Fallback matched invalid CUI string: '\(numbersOnly)'")
+                return
             }
         }
         
         for keywordBox in candidateBoxes {
             let nearbyBoxes = boxes.filter {
                 ($0.x != keywordBox.x || $0.y != keywordBox.y) &&
-                $0.y >= keywordBox.y - keywordBox.h * 1.5 && $0.y <= keywordBox.y + keywordBox.h * 3.0 &&
+                $0.y >= keywordBox.y - keywordBox.h * 0.8 && $0.y <= keywordBox.y + keywordBox.h * 2.0 &&
                 $0.x >= keywordBox.x - keywordBox.w * 0.5
-            }
+            }.sorted { $0.x < $1.x }
+            
             for nb in nearbyBoxes {
                 if nb.text.contains("%") { continue }
-                if let cleaned = cleanCandidate(nb.text) {
-                    let dx = nb.x - keywordBox.x
-                    let dy = nb.y - keywordBox.y
-                    let dist = sqrt(dx*dx + dy*dy)
-                    fallbackCandidates.append((text: cleaned, distance: dist))
+                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+                let numbersOnly = String(text.filter { $0.isNumber })
+                if numbersOnly.count >= 5 && numbersOnly.count <= 10 {
+                    result.cui = numbersOnly
+                    result.cuiRequiresVerification = true
+                    print("[CUI Extraction] Fallback matched nearby invalid CUI string: '\(numbersOnly)'")
+                    return
                 }
             }
         }
         
-        if !fallbackCandidates.isEmpty {
-            let sortedCandidates = fallbackCandidates.sorted { $0.distance < $1.distance }
-            let bestCandidate = sortedCandidates.first!.text
-            result.cui = bestCandidate
-            result.cuiRequiresVerification = true
-            print("[CUI Extraction] Fallback matched candidate: '\(bestCandidate)'")
-            return
-        }
-        
+        // Fara fallback global pe numere oarecare (ex: regex \b([0-9]{2,10})\b) deoarece atrage
+        // "Totaluri" care trec de testul mod-11 accidental (ex: 146.26 -> 14626).
         result.cuiRequiresVerification = true
     }
 
@@ -989,89 +948,67 @@ class FinancialAmountsAgent: AccountingAgent {
         } else {
             var breakdowns: [VatBreakdown] = []
             
-            for line in lines {
-                let sortedLine = line.sorted { $0.x < $1.x }
-                let lineText = sortedLine.map { $0.text }.joined(separator: " ")
-                
-                // Find percentage
-                let pctPattern = "\\b([0-9]{1,2})(?:[.,][0-9]{1,2})?\\s*%"
-                guard let pctRegex = try? NSRegularExpression(pattern: pctPattern, options: []),
-                      let pctMatch = pctRegex.firstMatch(in: lineText, options: [], range: NSRange(location: 0, length: lineText.utf16.count)) else {
-                    continue
-                }
-                
-                let pctRange = pctMatch.range(at: 0)
-                let nsLineText = lineText as NSString
-                let pctMatchString = nsLineText.substring(with: pctRange)
-                let cleanLineText = lineText.replacingOccurrences(of: pctMatchString, with: "")
-                
-                let pctStr = nsLineText.substring(with: pctMatch.range(at: 1))
-                guard let rate = Double(pctStr) else { continue }
-                
-                // Find all other decimal numbers
-                let decPattern = "\\b([0-9]+[.,][0-9]{2})\\b"
-                guard let decRegex = try? NSRegularExpression(pattern: decPattern, options: []) else { continue }
-                let nsCleanText = cleanLineText as NSString
-                let matches = decRegex.matches(in: cleanLineText, options: [], range: NSRange(location: 0, length: nsCleanText.length))
-                
-                var vals: [Double] = []
-                for m in matches {
-                    let matchedStr = nsCleanText.substring(with: m.range(at: 1)).replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(matchedStr) {
-                        vals.append(val)
+            // 1. GATHER ALL PERCENTAGES FROM THE DOCUMENT
+            let pctPattern = "\\b([0-9]{1,2})(?:[.,][0-9]{1,2})?\\s*%"
+            var rates: [Double] = []
+            if let pctRegex = try? NSRegularExpression(pattern: pctPattern, options: []) {
+                let matches = pctRegex.matches(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count))
+                for match in matches {
+                    let pctStr = (fullText as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+                    if let rate = Double(pctStr), !rates.contains(rate) {
+                        rates.append(rate)
                     }
                 }
-                
+            }
+            
+            // 2. GATHER ALL DECIMAL AMOUNTS FROM THE DOCUMENT
+            let decPattern = "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)"
+            var allVals: [Double] = []
+            if let decRegex = try? NSRegularExpression(pattern: decPattern, options: []) {
+                let matches = decRegex.matches(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count))
+                for match in matches {
+                    let valStr = (fullText as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+                    if let val = Double(valStr), !allVals.contains(val) {
+                        allVals.append(val)
+                    }
+                }
+            }
+            
+            // Daca nu am gasit nicio cota TVA explicita, folosim cotele din Romania (21, 19, 11, 9, 5) ca ipoteze
+            if rates.isEmpty {
+                rates = [21.0, 19.0, 11.0, 9.0, 5.0]
+            }
+            
+            // 3. PURE MATHEMATICAL MATCHING (Rotation & Spatial Invariant)
+            for rate in rates {
+                if rate == 0.0 { continue }
                 var vatAmount: Double? = nil
                 var baseAmount: Double? = nil
                 
-                if vals.count >= 2 {
-                    for i in 0..<vals.count {
-                        for j in 0..<vals.count {
-                            if i == j { continue }
-                            let baseCand = vals[i]
-                            let vatCand = vals[j]
-                            if abs(vatCand - baseCand * (rate / 100.0)) < 0.05 {
+                // Match Method A: Daca avem Totalul, testam daca vreun numar este TVA-ul (vat = total * rate / (100 + rate))
+                if let total = result.totalAmount {
+                    let expectedVat = (total * rate) / (100.0 + rate)
+                    for val in allVals {
+                        if abs(val - expectedVat) <= 0.05 {
+                            vatAmount = val
+                            baseAmount = ((total - val) * 100).rounded() / 100
+                            break
+                        }
+                    }
+                }
+                
+                // Match Method B: Cautam Baza si TVA direct in numerele extrase
+                if vatAmount == nil {
+                    for baseCand in allVals {
+                        for vatCand in allVals {
+                            if baseCand == vatCand { continue }
+                            if abs(vatCand - baseCand * (rate / 100.0)) <= 0.05 {
                                 vatAmount = vatCand
                                 baseAmount = baseCand
                                 break
                             }
                         }
                         if vatAmount != nil { break }
-                    }
-                    
-                    if vatAmount == nil {
-                        for i in 0..<vals.count {
-                            for j in 0..<vals.count {
-                                if i == j { continue }
-                                let baseCand = vals[i]
-                                let totalCand = vals[j]
-                                 if abs(totalCand - baseCand * (1.0 + rate / 100.0)) < 0.05 {
-                                    baseAmount = baseCand
-                                    vatAmount = ((totalCand - baseCand) * 100).rounded() / 100
-                                    break
-                                }
-                            }
-                            if vatAmount != nil { break }
-                        }
-                    }
-                    
-                    if vatAmount == nil {
-                        let sortedVals = vals.sorted()
-                        vatAmount = sortedVals[0]
-                        baseAmount = sortedVals[1]
-                    }
-                } else if vals.count == 1 {
-                    let val = vals[0]
-                    if rate == 0.0 {
-                        baseAmount = val
-                        vatAmount = 0.0
-                    } else if let total = result.totalAmount, abs(val - total) < 0.05 {
-                        baseAmount = (total / (1.0 + rate / 100.0) * 100).rounded() / 100
-                        vatAmount = ((total - baseAmount!) * 100).rounded() / 100
-                    } else {
-                        vatAmount = val
-                        baseAmount = (val / (rate / 100.0) * 100).rounded() / 100
                     }
                 }
                 
@@ -1083,15 +1020,27 @@ class FinancialAmountsAgent: AccountingAgent {
                 }
             }
             
-            if breakdowns.isEmpty {
-                let totalVatPattern = "TOTAL\\s*TVA[^0-9]{0,15}?([0-9]+[,.][0-9]{2})"
-                if let regex = try? NSRegularExpression(pattern: totalVatPattern, options: []),
-                   let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)), match.numberOfRanges > 1 {
-                    let valString = (fullText as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(valString) {
-                        let pctString = "Mixt"
-                        let base = result.totalAmount != nil ? (result.totalAmount! - val) : val
-                        breakdowns.append(VatBreakdown(percentage: pctString, vatAmount: val, baseAmount: base))
+            // 4. FALLBACK: Cautare de proximitate daca nu trece matematic, dar gasim "TVA" scris langa un numar
+            if breakdowns.isEmpty && fullText.contains("TVA") {
+                if let total = result.totalAmount {
+                    for box in boxes {
+                        if box.text.uppercased().contains("TVA") {
+                            let nearby = boxes.filter { $0.x != box.x || $0.y != box.y }
+                                .sorted { (b1, b2) in
+                                    let d1 = pow(b1.x - box.x, 2) + pow(b1.y - box.y, 2)
+                                    let d2 = pow(b2.x - box.x, 2) + pow(b2.y - box.y, 2)
+                                    return d1 < d2
+                                }
+                            if let closest = nearby.first,
+                               let decRegex = try? NSRegularExpression(pattern: "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)", options: []),
+                               let match = decRegex.firstMatch(in: closest.text, options: [], range: NSRange(location: 0, length: closest.text.utf16.count)) {
+                                let valStr = (closest.text as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+                                if let val = Double(valStr), val > 0 && val < total * 0.3 {
+                                    breakdowns.append(VatBreakdown(percentage: "Mixt", vatAmount: val, baseAmount: ((total - val) * 100).rounded() / 100))
+                                    break
+                                }
+                            }
+                        }
                     }
                 }
             }
