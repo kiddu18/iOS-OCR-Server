@@ -1555,28 +1555,40 @@ public class AccountingOrchestrator {
         }
         
         func assignBoxes(_ bxs: [OCRBoxItem], anchors: [OCRBoxItem]) -> [[OCRBoxItem]] {
+            let isRotated = anchors.contains { $0.h > $0.w * 2 }
             var improvedPositions: [(Double, Double)] = []
+            
             for anchor in anchors {
-                let ax = anchor.x + anchor.w / 2.0
-                let ay = anchor.y + anchor.h / 2.0
+                var ax = anchor.x + anchor.w / 2.0
+                var ay = anchor.y + anchor.h / 2.0
                 
-                // Cautam box-uri fix deasupra (header = nume firma) pentru a gasi un centroid mai bun
                 var headerBoxes: [OCRBoxItem] = []
-                // Folosim 'boxes' global ca sa gasim header-ul chiar si la sub-splitari
                 for b in boxes {
                     let bx = b.x + b.w / 2.0
                     let by = b.y + b.h / 2.0
-                    if by < ay && abs(bx - ax) < medianHeight * 2.5 && (ay - by) < medianHeight * 3.5 {
-                        headerBoxes.append(b)
+                    if isRotated {
+                        // For rotated, "header" is to the left (smaller x)
+                        if bx < ax && abs(by - ay) < medianHeight * 2.5 && (ax - bx) < medianHeight * 3.5 {
+                            headerBoxes.append(b)
+                        }
+                    } else {
+                        // For upright, "header" is above (smaller y)
+                        if by < ay && abs(bx - ax) < medianHeight * 2.5 && (ay - by) < medianHeight * 3.5 {
+                            headerBoxes.append(b)
+                        }
                     }
                 }
                 
-                var improvedY = ay
                 if !headerBoxes.isEmpty {
-                    let topY = headerBoxes.map { $0.y + $0.h / 2.0 }.min() ?? ay
-                    improvedY = (topY + ay) / 2.0
+                    if isRotated {
+                        let topX = headerBoxes.map { $0.x + $0.w / 2.0 }.min() ?? ax
+                        ax = (topX + ax) / 2.0
+                    } else {
+                        let topY = headerBoxes.map { $0.y + $0.h / 2.0 }.min() ?? ay
+                        ay = (topY + ay) / 2.0
+                    }
                 }
-                improvedPositions.append((ax, improvedY))
+                improvedPositions.append((ax, ay))
             }
             
             var groups: [[OCRBoxItem]] = Array(repeating: [], count: anchors.count)
@@ -1586,8 +1598,18 @@ public class AccountingOrchestrator {
                 var bestDist: Double = .infinity
                 var bestIdx = 0
                 for (i, pos) in improvedPositions.enumerated() {
-                    // Y (coloana) conteaza 3x mai mult decat X (pozitia pe bon)
-                    let dist = abs(by - pos.1) * 3.0 + abs(bx - pos.0)
+                    let dx = abs(bx - pos.0)
+                    let dy = abs(by - pos.1)
+                    
+                    var dist = 0.0
+                    if isRotated {
+                        // Y is cross-receipt. X is along-receipt.
+                        dist = pow(dx, 1.5) + pow(dy * 4.0, 2)
+                    } else {
+                        // X is cross-receipt. Y is along-receipt.
+                        dist = pow(dy, 1.5) + pow(dx * 4.0, 2)
+                    }
+                    
                     if dist < bestDist {
                         bestDist = dist
                         bestIdx = i
