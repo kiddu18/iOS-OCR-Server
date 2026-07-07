@@ -667,7 +667,7 @@ class DocumentDetailsAgent: AccountingAgent {
             }
         }
         
-        let numberPattern = "(?:NR\\.?|NUMAR|BON\\s*NR\\.?|FACTURA\\s*NR\\.?|CHITANTA\\s*NR\\.?|BF\\.?)\\s*[:]*\\s*([0-9]{1,10})"
+        let numberPattern = "(?:NR\\.?|NUMAR|BON\\s*NR\\.?|FACTURA\\s*NR\\.?|CHITANTA\\s*NR\\.?|BF\\.?|ID\\s*TRX\\.?)\\s*[:]*\\s*([0-9]{1,15})"
         if let regex = try? NSRegularExpression(pattern: numberPattern, options: []) {
             let nsString = fullText as NSString
             let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
@@ -676,7 +676,7 @@ class DocumentDetailsAgent: AccountingAgent {
             }
         }
         
-        let datePattern = "(?:DATA\\s*[:]*\\s*)?([0-3][0-9][\\.\\-\\/][0-1][0-9][\\.\\-\\/]20[0-9]{2})"
+        let datePattern = "(?:DATA\\s*[:]*\\s*)?([0-3]?[0-9][\\.\\-\\/][0-1]?[0-9][\\.\\-\\/](?:20)?[0-9]{2})"
         if let regex = try? NSRegularExpression(pattern: datePattern, options: []) {
             let nsString = fullText as NSString
             let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
@@ -810,30 +810,6 @@ class CuiExtractorAgent: AccountingAgent {
                 await verifyWithANAF(cui: numbersOnly, result: &result)
                 result.cui = numbersOnly
                 return
-            }
-        }
-        
-        for keywordBox in candidateBoxes {
-            let nearbyBoxes = boxes.filter {
-                let dist = sqrt(pow($0.x - keywordBox.x, 2) + pow($0.y - keywordBox.y, 2))
-                return dist < medianHeight * 3.0 && !($0.x == keywordBox.x && $0.y == keywordBox.y)
-            }.sorted { b1, b2 in
-                let d1 = pow(b1.x - keywordBox.x, 2) + pow(b1.y - keywordBox.y, 2)
-                let d2 = pow(b2.x - keywordBox.x, 2) + pow(b2.y - keywordBox.y, 2)
-                return d1 < d2
-            }
-            
-            for nb in nearbyBoxes {
-                if nb.text.contains("%") { continue }
-                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-                let numbersOnly = String(text.filter { $0.isNumber })
-                if numbersOnly.count >= 5 && numbersOnly.count <= 10 {
-                    result.cui = numbersOnly
-                    result.cuiRequiresVerification = true
-                    await verifyWithANAF(cui: numbersOnly, result: &result)
-                    result.cui = numbersOnly
-                    return
-                }
             }
         }
         
@@ -1049,15 +1025,18 @@ class FinancialAmountsAgent: AccountingAgent {
                                     let d2 = pow(b2.x - box.x, 2) + pow(b2.y - box.y, 2)
                                     return d1 < d2
                                 }
-                            if let closest = nearby.first,
-                               let decRegex = try? NSRegularExpression(pattern: "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)", options: []),
-                               let match = decRegex.firstMatch(in: closest.text, options: [], range: NSRange(location: 0, length: closest.text.utf16.count)) {
-                                let valStr = (closest.text as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
-                                if let val = Double(valStr), val > 0 && val < total * 0.3 {
-                                    breakdowns.append(VatBreakdown(percentage: "Mixt", vatAmount: val, baseAmount: ((total - val) * 100).rounded() / 100))
-                                    break
+                            for closest in nearby.prefix(10) {
+                                let sanitized = closest.text.replacingOccurrences(of: " ", with: "")
+                                if let decRegex = try? NSRegularExpression(pattern: "([0-9]+[.,][0-9]{2})", options: []),
+                                   let match = decRegex.firstMatch(in: sanitized, options: [], range: NSRange(location: 0, length: sanitized.utf16.count)) {
+                                    let valStr = (sanitized as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
+                                    if let val = Double(valStr), val > 0 && val < total * 0.3 {
+                                        breakdowns.append(VatBreakdown(percentage: "Mixt", vatAmount: val, baseAmount: ((total - val) * 100).rounded() / 100))
+                                        break
+                                    }
                                 }
                             }
+                            if !breakdowns.isEmpty { break }
                         }
                     }
                 }
