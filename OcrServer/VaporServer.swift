@@ -867,15 +867,13 @@ class FinancialAmountsAgent: AccountingAgent {
                 continue
             }
             if totalKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
-                let yTol = max(box.h * 0.6, 15.0)
-                let lineBoxes = boxes.filter { b in
-                    (b.x != box.x || b.y != box.y) &&
-                    abs(b.y - box.y) < yTol &&
-                    b.x > box.x - box.w * 0.5
-                }.sorted { $0.x < $1.x }
+                // Check if this "TOTAL" is actually "TOTAL TVA" by checking nearby text
+                let nearbyText = boxes.filter { b in
+                    let dist = sqrt(pow(b.x - box.x, 2) + pow(b.y - box.y, 2))
+                    return dist < medianHeight * 2.0 && !(b.x == box.x && b.y == box.y)
+                }.map { $0.text.uppercased() }.joined(separator: " ") + " " + box.text.uppercased()
                 
-                let lineText = lineBoxes.map { $0.text.uppercased() }.joined(separator: " ") + " " + box.text.uppercased()
-                var checkText = lineText
+                var checkText = nearbyText
                 checkText = checkText.replacingOccurrences(of: "TVA INCLUS", with: "")
                 checkText = checkText.replacingOccurrences(of: "TVA INCL", with: "")
                 checkText = checkText.replacingOccurrences(of: "TAXE INCLUSE", with: "")
@@ -884,14 +882,25 @@ class FinancialAmountsAgent: AccountingAgent {
                     continue
                 }
                 
-                for lBox in lineBoxes {
-                    if lBox.x <= box.x { continue }
-                    let sanitized = lBox.text.replacingOccurrences(of: ",", with: ".")
+                // Find the nearest box containing a decimal number
+                // Sort all boxes by distance to this TOTAL box
+                let candidates = boxes.filter { b in
+                    !(b.x == box.x && b.y == box.y)
+                }.sorted { b1, b2 in
+                    let d1 = pow(b1.x - box.x, 2) + pow(b1.y - box.y, 2)
+                    let d2 = pow(b2.x - box.x, 2) + pow(b2.y - box.y, 2)
+                    return d1 < d2
+                }
+                
+                for cand in candidates.prefix(8) {
+                    let sanitized = cand.text.replacingOccurrences(of: ",", with: ".")
                     let pattern = "([0-9]+[.][0-9]{2})"
                     if let regex = try? NSRegularExpression(pattern: pattern, options: []),
                        let match = regex.firstMatch(in: sanitized, options: [], range: NSRange(location: 0, length: sanitized.utf16.count)) {
                         let matchedString = (sanitized as NSString).substring(with: match.range(at: 1))
-                        if let val = Double(matchedString) {
+                        if let val = Double(matchedString), val > 1.0 {
+                            // Sanity: skip if the number is likely a percentage (21.00, etc)
+                            if val == 21.00 || val == 19.00 || val == 11.00 || val == 9.00 || val == 5.00 { continue }
                             result.totalAmount = val
                             result.totalRequiresVerification = false
                             totalFound = true
@@ -1554,111 +1563,6 @@ public class AccountingOrchestrator {
             return t.contains("CLIENT") || t.contains("CUMP") || t.contains("BENEF") || t.contains("CNP")
         }
         
-        func assignBoxes(_ bxs: [OCRBoxItem], anchors: [OCRBoxItem]) -> [[OCRBoxItem]] {
-            let isRotated = anchors.contains { $0.h > $0.w * 2 }
-            var improvedPositions: [(Double, Double)] = []
-            
-            for anchor in anchors {
-                var ax = anchor.x + anchor.w / 2.0
-                var ay = anchor.y + anchor.h / 2.0
-                
-                var headerBoxes: [OCRBoxItem] = []
-                for b in boxes {
-                    let bx = b.x + b.w / 2.0
-                    let by = b.y + b.h / 2.0
-                    if isRotated {
-                        // For rotated, "header" is to the left (smaller x)
-                        if bx < ax && abs(by - ay) < medianHeight * 2.5 && (ax - bx) < medianHeight * 3.5 {
-                            headerBoxes.append(b)
-                        }
-                    } else {
-                        // For upright, "header" is above (smaller y)
-                        if by < ay && abs(bx - ax) < medianHeight * 2.5 && (ay - by) < medianHeight * 3.5 {
-                            headerBoxes.append(b)
-                        }
-                    }
-                }
-                
-                if !headerBoxes.isEmpty {
-                    if isRotated {
-                        let topX = headerBoxes.map { $0.x + $0.w / 2.0 }.min() ?? ax
-                        ax = (topX + ax) / 2.0
-                    } else {
-                        let topY = headerBoxes.map { $0.y + $0.h / 2.0 }.min() ?? ay
-                        ay = (topY + ay) / 2.0
-                    }
-                }
-                improvedPositions.append((ax, ay))
-            }
-            
-            var groups: [[OCRBoxItem]] = Array(repeating: [], count: anchors.count)
-            for box in bxs {
-                let bx = box.x + box.w / 2.0
-                let by = box.y + box.h / 2.0
-                var bestDist: Double = .infinity
-                var bestIdx = 0
-                for (i, pos) in improvedPositions.enumerated() {
-                    let dx = abs(bx - pos.0)
-                    let dy = abs(by - pos.1)
-                    
-                    var dist = 0.0
-                    if isRotated {
-                        // Y is cross-receipt. X is along-receipt.
-                        dist = pow(dx, 1.5) + pow(dy * 4.0, 2)
-                    } else {
-                        // X is cross-receipt. Y is along-receipt.
-                        dist = pow(dy, 1.5) + pow(dx * 4.0, 2)
-                    }
-                    
-                    if dist < bestDist {
-                        bestDist = dist
-                        bestIdx = i
-                    }
-                }
-                groups[bestIdx].append(box)
-            }
-            return groups
-        }
-        
-        // Pass 2: Split orice cluster cu mai multe CUI-uri de vanzator
-        func splitMultiCuiClusters(_ clusters: [[OCRBoxItem]]) -> [[OCRBoxItem]] {
-            var result: [[OCRBoxItem]] = []
-            for cluster in clusters {
-                if cluster.count < 3 { continue }
-                
-                var sellerCuiAnchors: [OCRBoxItem] = []
-                for box in cluster {
-                    if isBuyerText(box.text) { continue }
-                    let upper = box.text.uppercased()
-                        .replacingOccurrences(of: " ", with: "")
-                        .replacingOccurrences(of: ".", with: "")
-                    if upper.contains("CODFISCAL") || upper.contains("CODIDENTIFICARE") || upper.contains("IDENTIFICAREFISCALA") {
-                        let numbersOnly = box.text.filter { $0.isNumber }
-                        if numbersOnly.count >= 5 {
-                            var dup = false
-                            for e in sellerCuiAnchors {
-                                if abs(e.x - box.x) < medianHeight * 3 && abs(e.y - box.y) < medianHeight * 2 {
-                                    dup = true; break
-                                }
-                            }
-                            if !dup { sellerCuiAnchors.append(box) }
-                        }
-                    }
-                }
-                
-                if sellerCuiAnchors.count > 1 {
-                    print("[CLUSTER] Pass2: Splitting cluster (\(cluster.count) boxes) with \(sellerCuiAnchors.count) CUIs")
-                    let subClusters = assignBoxes(cluster, anchors: sellerCuiAnchors)
-                    for sc in subClusters {
-                        if sc.count >= 3 { result.append(sc) }
-                    }
-                } else {
-                    result.append(cluster)
-                }
-            }
-            return result
-        }
-        
         // Sortare finala: pe Y apoi pe X
         func sortClusters(_ clusters: inout [[OCRBoxItem]]) {
             clusters.sort {
@@ -1671,23 +1575,12 @@ public class AccountingOrchestrator {
             }
         }
         
-        func logResult(_ label: String, _ clusters: [[OCRBoxItem]]) {
-            print("[CLUSTER] === DONE (\(label)) === Returning \(clusters.count) clusters")
-            for (i, c) in clusters.enumerated() {
-                let minY = c.map { $0.y }.min() ?? 0
-                let minX = c.map { $0.x }.min() ?? 0
-                print("[CLUSTER]   Cluster \(i): \(c.count) boxes, topLeft=(\(Int(minX)),\(Int(minY)))")
-            }
-        }
-        
         // =====================================================================
-        // NIVEL 1: CUI ANCHORS
-        // Cel mai fiabil pentru bonuri fiscale romanesti (fiecare bon are un CUI)
+        // FIND CUI ANCHORS
         // =====================================================================
         
         var cuiAnchors: [OCRBoxItem] = []
         
-        // 1a. Box-uri cu "COD FISCAL" / "Cod Identificare Fiscala" care contin un numar
         for box in boxes {
             if isBuyerText(box.text) { continue }
             let upper = box.text.uppercased()
@@ -1704,13 +1597,13 @@ public class AccountingOrchestrator {
                     }
                     if !dup {
                         cuiAnchors.append(box)
-                        print("[CLUSTER] L1 CUI anchor: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
+                        print("[CLUSTER] CUI anchor: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
                     }
                 }
             }
         }
         
-        // 1b. "CIF" standalone (pt bonuri unde CIF e separat de numar)
+        // "CIF" standalone
         for box in boxes {
             if isBuyerText(box.text) { continue }
             let trimmed = box.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1729,7 +1622,7 @@ public class AccountingOrchestrator {
                             }
                             if !dup {
                                 cuiAnchors.append(box)
-                                print("[CLUSTER] L1 CIF standalone: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
+                                print("[CLUSTER] CIF standalone: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
                             }
                             break
                         }
@@ -1738,162 +1631,155 @@ public class AccountingOrchestrator {
             }
         }
         
-        print("[CLUSTER] L1: \(cuiAnchors.count) CUI anchors found")
+        print("[CLUSTER] Found \(cuiAnchors.count) CUI anchors")
+        
+        // =====================================================================
+        // RECURSIVE BISECTION CLUSTERING
+        // Splits box groups along the axis where CUI anchors have the largest
+        // gap, using actual box position gaps rather than midpoints.
+        // Works universally: rotated, 2D grids, single columns, any layout.
+        // =====================================================================
         
         if cuiAnchors.count > 1 {
-            var clusters = assignBoxes(boxes, anchors: cuiAnchors)
-            clusters = clusters.filter { $0.count >= 3 }
-            if !clusters.isEmpty {
-                var result = splitMultiCuiClusters(clusters)
-                if !result.isEmpty {
-                    sortClusters(&result)
-                    logResult("CUI anchors", result)
-                    return result
+            
+            func getAnchorsIn(_ group: [OCRBoxItem]) -> [OCRBoxItem] {
+                return cuiAnchors.filter { anchor in
+                    group.contains { $0.x == anchor.x && $0.y == anchor.y && $0.text == anchor.text }
                 }
             }
-        }
-        
-        // =====================================================================
-        // NIVEL 2: BON FISCAL ANCHORS
-        // Fallback daca CUI nu e detectabil (OCR slab, format non-standard)
-        // Fiecare bon fiscal romanesc are textul "BON FISCAL" la sfarsit
-        // =====================================================================
-        
-        print("[CLUSTER] L2: Trying BON FISCAL anchors...")
-        var bonAnchors: [OCRBoxItem] = []
-        
-        // 2a. BON FISCAL in text (nu NUMAR BON FISCAL, nu COD FISCAL)
-        for box in boxes {
-            let upper = box.text.uppercased()
-                .replacingOccurrences(of: ".", with: "")
-                .replacingOccurrences(of: " ", with: "")
-            if upper.contains("BONFISCAL") || upper.contains("B0NFISCAL") {
-                if upper.hasPrefix("NUMAR") { continue }
-                if upper.contains("COD") || upper.contains("CIF") || upper.contains("CUI") || upper.contains("IDENTIFICARE") { continue }
-                var dup = false
-                for e in bonAnchors {
-                    if abs(e.x - box.x) < medianHeight * 8 && abs(e.y - box.y) < medianHeight * 3 {
-                        dup = true; break
-                    }
-                }
-                if !dup {
-                    bonAnchors.append(box)
-                    print("[CLUSTER] L2 BON anchor: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
-                }
-            }
-        }
-        
-        // 2b. "BON" + "FISCAL" in box-uri separate dar apropiate
-        for box in boxes {
-            let upper = box.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-            if upper == "BON" || upper == "B O N" {
-                for box2 in boxes {
-                    let u2 = box2.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-                    if u2 == "FISCAL" || u2 == "F I S C A L" {
-                        if abs(box.x - box2.x) < medianHeight * 3 && abs(box.y - box2.y) < medianHeight * 3 {
-                            var dup = false
-                            for e in bonAnchors {
-                                if abs(e.x - box.x) < medianHeight * 8 && abs(e.y - box.y) < medianHeight * 5 {
-                                    dup = true; break
-                                }
-                            }
-                            if !dup {
-                                bonAnchors.append(box)
-                                print("[CLUSTER] L2 BON split: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
-                            }
-                            break
-                        }
-                    }
-                }
-            }
-        }
-        
-        print("[CLUSTER] L2: \(bonAnchors.count) BON FISCAL anchors found")
-        
-        if bonAnchors.count > 1 {
-            var clusters = assignBoxes(boxes, anchors: bonAnchors)
-            clusters = clusters.filter { $0.count >= 3 }
-            if !clusters.isEmpty {
-                var result = splitMultiCuiClusters(clusters)
-                if !result.isEmpty {
-                    sortClusters(&result)
-                    logResult("BON FISCAL anchors", result)
-                    return result
-                }
-            }
-        }
-        
-        // =====================================================================
-        // NIVEL 3: UNION-FIND SPATIAL PROXIMITY
-        // Fallback final: grupeaza box-urile bazat pe proximitate fizica
-        // Util pentru: imagini fara text fiscal clar, bonuri ne-romanesti, PDF-uri
-        // =====================================================================
-        
-        print("[CLUSTER] L3: Trying Union-Find spatial proximity...")
-        
-        var parent = Array(0..<boxes.count)
-        var ufRank = Array(repeating: 0, count: boxes.count)
-        
-        func find(_ x: Int) -> Int {
-            var x = x
-            while parent[x] != x {
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            }
-            return x
-        }
-        
-        func union(_ a: Int, _ b: Int) {
-            let ra = find(a), rb = find(b)
-            if ra == rb { return }
-            if ufRank[ra] < ufRank[rb] { parent[ra] = rb }
-            else if ufRank[ra] > ufRank[rb] { parent[rb] = ra }
-            else { parent[rb] = ra; ufRank[ra] += 1 }
-        }
-        
-        // Praguri bazate pe medianHeight - calibrate sa nu inlantuiasca bonuri diferite
-        let verticalThreshold = medianHeight * 1.5
-        let horizontalThreshold = medianHeight * 3.0
-        
-        for i in 0..<boxes.count {
-            let a = boxes[i]
-            for j in (i + 1)..<boxes.count {
-                let b = boxes[j]
-                let verticalGap = max(0, max(b.y - (a.y + a.h), a.y - (b.y + b.h)))
-                let horizontalGap = max(0, max(b.x - (a.x + a.w), a.x - (b.x + b.w)))
+            
+            func findBestGapSplit(_ group: [OCRBoxItem], axis: String) -> Double? {
+                let anchorsInGroup = getAnchorsIn(group)
+                if anchorsInGroup.count < 2 { return nil }
                 
-                if verticalGap < verticalThreshold && horizontalGap < horizontalThreshold {
-                    union(i, j)
+                let centers: [Double]
+                let anchorPositions: [Double]
+                
+                if axis == "x" {
+                    centers = group.map { $0.x + $0.w / 2.0 }.sorted()
+                    anchorPositions = anchorsInGroup.map { $0.x + $0.w / 2.0 }
+                } else {
+                    centers = group.map { $0.y + $0.h / 2.0 }.sorted()
+                    anchorPositions = anchorsInGroup.map { $0.y + $0.h / 2.0 }
                 }
+                
+                var bestGap: Double = 0
+                var bestSplit: Double? = nil
+                
+                for i in 1..<centers.count {
+                    let gap = centers[i] - centers[i - 1]
+                    if gap <= bestGap { continue }
+                    
+                    let splitPoint = (centers[i - 1] + centers[i]) / 2.0
+                    
+                    let leftAnchors = anchorPositions.filter { $0 < splitPoint }.count
+                    let rightAnchors = anchorPositions.filter { $0 >= splitPoint }.count
+                    
+                    if leftAnchors > 0 && rightAnchors > 0 {
+                        bestGap = gap
+                        bestSplit = splitPoint
+                    }
+                }
+                
+                return bestSplit
             }
-        }
-        
-        var ufGroups: [Int: [Int]] = [:]
-        for i in 0..<boxes.count {
-            let root = find(i)
-            ufGroups[root, default: []].append(i)
-        }
-        
-        var clusters: [[OCRBoxItem]] = ufGroups.values.map { indices in
-            indices.map { boxes[$0] }
-        }
-        
-        clusters = clusters.filter { $0.count >= 3 }
-        
-        if clusters.count > 1 {
-            var result = splitMultiCuiClusters(clusters)
-            if !result.isEmpty {
-                sortClusters(&result)
-                logResult("Union-Find", result)
+            
+            func recursiveSplit(_ group: [OCRBoxItem], depth: Int = 0) -> [[OCRBoxItem]] {
+                let anchorsInGroup = getAnchorsIn(group)
+                
+                if anchorsInGroup.count <= 1 {
+                    return [group]
+                }
+                
+                let splitX = findBestGapSplit(group, axis: "x")
+                let splitY = findBestGapSplit(group, axis: "y")
+                
+                func gapSize(_ group: [OCRBoxItem], _ axis: String, _ splitPoint: Double?) -> Double {
+                    guard let sp = splitPoint else { return 0 }
+                    let centers: [Double]
+                    if axis == "x" {
+                        centers = group.map { $0.x + $0.w / 2.0 }.sorted()
+                    } else {
+                        centers = group.map { $0.y + $0.h / 2.0 }.sorted()
+                    }
+                    let leftMax = centers.filter { $0 < sp }.max() ?? sp
+                    let rightMin = centers.filter { $0 >= sp }.min() ?? sp
+                    return rightMin - leftMax
+                }
+                
+                var gapX = gapSize(group, "x", splitX)
+                var gapY = gapSize(group, "y", splitY)
+                
+                var finalSplitX = splitX
+                var finalSplitY = splitY
+                
+                // Fallback: midpoint between most distant anchors
+                if gapX == 0 && gapY == 0 {
+                    let anchorXs = anchorsInGroup.map { $0.x + $0.w / 2.0 }.sorted()
+                    let anchorYs = anchorsInGroup.map { $0.y + $0.h / 2.0 }.sorted()
+                    let xSpread = (anchorXs.last ?? 0) - (anchorXs.first ?? 0)
+                    let ySpread = (anchorYs.last ?? 0) - (anchorYs.first ?? 0)
+                    
+                    if xSpread >= ySpread {
+                        var bestG = 0.0
+                        for i in 1..<anchorXs.count {
+                            let g = anchorXs[i] - anchorXs[i - 1]
+                            if g > bestG { bestG = g; finalSplitX = (anchorXs[i - 1] + anchorXs[i]) / 2.0 }
+                        }
+                        gapX = bestG
+                    } else {
+                        var bestG = 0.0
+                        for i in 1..<anchorYs.count {
+                            let g = anchorYs[i] - anchorYs[i - 1]
+                            if g > bestG { bestG = g; finalSplitY = (anchorYs[i - 1] + anchorYs[i]) / 2.0 }
+                        }
+                        gapY = bestG
+                    }
+                }
+                
+                let left: [OCRBoxItem]
+                let right: [OCRBoxItem]
+                
+                if gapX >= gapY, let sp = finalSplitX {
+                    print("[CLUSTER] Depth \(depth): Split on X at \(Int(sp)) (gap=\(Int(gapX)))")
+                    left = group.filter { $0.x + $0.w / 2.0 < sp }
+                    right = group.filter { $0.x + $0.w / 2.0 >= sp }
+                } else if let sp = finalSplitY {
+                    print("[CLUSTER] Depth \(depth): Split on Y at \(Int(sp)) (gap=\(Int(gapY)))")
+                    left = group.filter { $0.y + $0.h / 2.0 < sp }
+                    right = group.filter { $0.y + $0.h / 2.0 >= sp }
+                } else {
+                    return [group]
+                }
+                
+                var result: [[OCRBoxItem]] = []
+                if !left.isEmpty { result.append(contentsOf: recursiveSplit(left, depth: depth + 1)) }
+                if !right.isEmpty { result.append(contentsOf: recursiveSplit(right, depth: depth + 1)) }
                 return result
             }
+            
+            var clusters = recursiveSplit(boxes)
+            clusters = clusters.filter { $0.count >= 3 }
+            
+            if clusters.count > 1 {
+                sortClusters(&clusters)
+                print("[CLUSTER] === DONE (Recursive Bisection) === Returning \(clusters.count) clusters")
+                for (i, c) in clusters.enumerated() {
+                    let minY = c.map { $0.y }.min() ?? 0
+                    let minX = c.map { $0.x }.min() ?? 0
+                    print("[CLUSTER]   Cluster \(i): \(c.count) boxes, topLeft=(\(Int(minX)),\(Int(minY)))")
+                }
+                return clusters
+            }
         }
         
-        // Nimic nu a functionat - returnez tot ca un singur cluster
-        print("[CLUSTER] === DONE === No splitting possible, returning all as 1 cluster")
+        // Single receipt or no CUI anchors - return all as one cluster
+        print("[CLUSTER] === DONE === No splitting needed, returning all as 1 cluster")
         return [boxes]
     }
 }
+
+
 
 // MARK: - Fuzzy String Matching (Levenshtein)
 
