@@ -642,7 +642,21 @@ class DocumentClassificationAgent: AccountingAgent {
 
 class DocumentDetailsAgent: AccountingAgent {
     func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
-        let fullText = textBlocks.joined(separator: "\n").uppercased()
+        // Find Company Name
+        var companyName: String? = nil
+        for box in boxes {
+            let t = box.text.uppercased()
+            if t.contains("SRL") || t.contains("S.R.L") || t.contains("SA") || t.contains("S.A.") || t.contains("SNC") {
+                companyName = box.text
+                break
+            }
+        }
+        if companyName == nil, let firstBox = boxes.first(where: { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).count > 3 }) {
+            companyName = firstBox.text
+        }
+        result.companyName = companyName
+        
+        let fullText = boxes.map { $0.text }.joined(separator: " \n ").uppercased()
         
         let seriesPattern = "(?:SERIA|SERIE|SERIA:|CHITANTA\\s*SERIA)\\s*([A-Z]{1,5})"
         if let regex = try? NSRegularExpression(pattern: seriesPattern, options: []) {
@@ -674,111 +688,6 @@ class DocumentDetailsAgent: AccountingAgent {
 }
 
 class CuiExtractorAgent: AccountingAgent {
-    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
-        // Helper checking if a box represents a buyer
-        func isBuyerBox(_ box: OCRBoxItem) -> Bool {
-            let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
-            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
-            for kw in buyerKeywords {
-                if cleanText.contains(kw) { return true }
-            }
-            return false
-        }
-
-        let sortedHeights = boxes.map { $0.h }.sorted()
-        let medianHeight = sortedHeights.isEmpty ? 15.0 : CGFloat(sortedHeights[sortedHeights.count / 2])
-
-        // 1. Cautare pe baza de Keywords
-        let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "RO", "R0", "IDENTIFICARE"]
-        var candidateBoxes: [OCRBoxItem] = []
-        
-        for box in boxes {
-            let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
-            if isBuyerBox(box) { continue }
-            
-            if cuiKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
-                candidateBoxes.append(box)
-            }
-        }
-        
-        // A. Cautam CUI-uri perfect valide (trec checksum-ul)
-        // Verificam textul din interiorul cutiilor gasite
-        for box in candidateBoxes {
-            if box.text.contains("%") { continue }
-            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-            let numbersOnly = String(text.filter { $0.isNumber })
-            if isValidCUI(cui: numbersOnly) {
-                result.cui = numbersOnly
-                result.cuiRequiresVerification = false
-                await verifyWithANAF(cui: numbersOnly, result: &result)
-                result.cui = numbersOnly 
-                return
-            }
-        }
-        
-        // Cautam cutii vecine
-        for keywordBox in candidateBoxes {
-            let nearbyBoxes = boxes.filter {
-                ($0.x != keywordBox.x || $0.y != keywordBox.y) &&
-                $0.y >= keywordBox.y - keywordBox.h * 0.8 && $0.y <= keywordBox.y + keywordBox.h * 2.0 &&
-                $0.x >= keywordBox.x - keywordBox.w * 0.5
-            }.sorted { $0.x < $1.x }
-            
-            for nb in nearbyBoxes {
-                if nb.text.contains("%") { continue }
-                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-                let numbersOnly = String(text.filter { $0.isNumber })
-                if isValidCUI(cui: numbersOnly) {
-                    result.cui = numbersOnly
-                    result.cuiRequiresVerification = false
-                    await verifyWithANAF(cui: numbersOnly, result: &result)
-                    result.cui = numbersOnly
-                    return
-                }
-            }
-        }
-        
-        // B. Fallback OCR (nu trec checksum-ul din cauza erorilor ex: "R0774547?" missing a zero)
-        print("[CUI Extraction] No mathematically valid CUI found. Attempting OCR fallback for keyword candidates...")
-        
-        for box in candidateBoxes {
-            if box.text.contains("%") { continue }
-            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-            let numbersOnly = String(text.filter { $0.isNumber })
-            // Un CUI are intre 2 si 10 cifre. Daca avem 5+ cifre langa "CUI"/"RO", cel mai probabil e el.
-            if numbersOnly.count >= 5 && numbersOnly.count <= 10 {
-                result.cui = numbersOnly
-                result.cuiRequiresVerification = true
-                print("[CUI Extraction] Fallback matched invalid CUI string: '\(numbersOnly)'")
-                return
-            }
-        }
-        
-        for keywordBox in candidateBoxes {
-            let nearbyBoxes = boxes.filter {
-                ($0.x != keywordBox.x || $0.y != keywordBox.y) &&
-                $0.y >= keywordBox.y - keywordBox.h * 0.8 && $0.y <= keywordBox.y + keywordBox.h * 2.0 &&
-                $0.x >= keywordBox.x - keywordBox.w * 0.5
-            }.sorted { $0.x < $1.x }
-            
-            for nb in nearbyBoxes {
-                if nb.text.contains("%") { continue }
-                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-                let numbersOnly = String(text.filter { $0.isNumber })
-                if numbersOnly.count >= 5 && numbersOnly.count <= 10 {
-                    result.cui = numbersOnly
-                    result.cuiRequiresVerification = true
-                    print("[CUI Extraction] Fallback matched nearby invalid CUI string: '\(numbersOnly)'")
-                    return
-                }
-            }
-        }
-        
-        // Fara fallback global pe numere oarecare (ex: regex \b([0-9]{2,10})\b) deoarece atrage
-        // "Totaluri" care trec de testul mod-11 accidental (ex: 146.26 -> 14626).
-        result.cuiRequiresVerification = true
-    }
-
     
     private func verifyWithANAF(cui: String, result: inout AccountingResult) async {
         let urlString = "https://webservicesp.anaf.ro/PlatitorTvaRest/api/v8/ws/tva"
@@ -787,15 +696,13 @@ class CuiExtractorAgent: AccountingAgent {
             return
         }
         
+        let currentDate = Date()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
-        let dateString = formatter.string(from: Date())
+        let dateString = formatter.string(from: currentDate)
         
-        let payload: [[String: Any]] = [
-            [
-                "cui": Int(cui) ?? 0,
-                "data": dateString
-            ]
+        let payload: [[String: String]] = [
+            ["cui": cui, "data": dateString]
         ]
         
         guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
@@ -826,9 +733,111 @@ class CuiExtractorAgent: AccountingAgent {
                 result.cuiRequiresVerification = true
             }
         } catch {
-            // Nu stergem CUI-ul, doar marcam
             result.cuiRequiresVerification = true
         }
+    }
+
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
+        func isBuyerBox(_ box: OCRBoxItem) -> Bool {
+            let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
+            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
+            for kw in buyerKeywords {
+                if cleanText.contains(kw) { return true }
+            }
+            return false
+        }
+
+        let sortedHeights = boxes.map { $0.h }.sorted()
+        let medianHeight = sortedHeights.isEmpty ? 15.0 : CGFloat(sortedHeights[sortedHeights.count / 2])
+
+        let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "RO", "R0", "IDENTIFICARE"]
+        var candidateBoxes: [OCRBoxItem] = []
+        
+        for box in boxes {
+            let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
+            if isBuyerBox(box) { continue }
+            
+            if cuiKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
+                candidateBoxes.append(box)
+            }
+        }
+        
+        for box in candidateBoxes {
+            if box.text.contains("%") { continue }
+            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+            let numbersOnly = String(text.filter { $0.isNumber })
+            if isValidCUI(cui: numbersOnly) {
+                result.cui = numbersOnly
+                result.cuiRequiresVerification = false
+                await verifyWithANAF(cui: numbersOnly, result: &result)
+                result.cui = numbersOnly 
+                return
+            }
+        }
+        
+        for keywordBox in candidateBoxes {
+            let nearbyBoxes = boxes.filter {
+                let dist = sqrt(pow($0.x - keywordBox.x, 2) + pow($0.y - keywordBox.y, 2))
+                return dist < medianHeight * 3.0 && !($0.x == keywordBox.x && $0.y == keywordBox.y)
+            }.sorted { b1, b2 in
+                let d1 = pow(b1.x - keywordBox.x, 2) + pow(b1.y - keywordBox.y, 2)
+                let d2 = pow(b2.x - keywordBox.x, 2) + pow(b2.y - keywordBox.y, 2)
+                return d1 < d2
+            }
+            
+            for nb in nearbyBoxes {
+                if nb.text.contains("%") { continue }
+                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+                let numbersOnly = String(text.filter { $0.isNumber })
+                if isValidCUI(cui: numbersOnly) {
+                    result.cui = numbersOnly
+                    result.cuiRequiresVerification = false
+                    await verifyWithANAF(cui: numbersOnly, result: &result)
+                    result.cui = numbersOnly
+                    return
+                }
+            }
+        }
+        
+        for box in boxes {
+            if box.text.contains("%") { continue }
+            if isBuyerBox(box) { continue }
+            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+            let numbersOnly = String(text.filter { $0.isNumber })
+            if isValidCUI(cui: numbersOnly) {
+                result.cui = numbersOnly
+                result.cuiRequiresVerification = false
+                await verifyWithANAF(cui: numbersOnly, result: &result)
+                result.cui = numbersOnly
+                return
+            }
+        }
+        
+        for keywordBox in candidateBoxes {
+            let nearbyBoxes = boxes.filter {
+                let dist = sqrt(pow($0.x - keywordBox.x, 2) + pow($0.y - keywordBox.y, 2))
+                return dist < medianHeight * 3.0 && !($0.x == keywordBox.x && $0.y == keywordBox.y)
+            }.sorted { b1, b2 in
+                let d1 = pow(b1.x - keywordBox.x, 2) + pow(b1.y - keywordBox.y, 2)
+                let d2 = pow(b2.x - keywordBox.x, 2) + pow(b2.y - keywordBox.y, 2)
+                return d1 < d2
+            }
+            
+            for nb in nearbyBoxes {
+                if nb.text.contains("%") { continue }
+                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
+                let numbersOnly = String(text.filter { $0.isNumber })
+                if numbersOnly.count >= 5 && numbersOnly.count <= 10 {
+                    result.cui = numbersOnly
+                    result.cuiRequiresVerification = true
+                    await verifyWithANAF(cui: numbersOnly, result: &result)
+                    result.cui = numbersOnly
+                    return
+                }
+            }
+        }
+        
+        result.cuiRequiresVerification = true
     }
 }
 

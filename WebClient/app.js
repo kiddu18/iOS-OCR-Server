@@ -122,6 +122,7 @@ function renderPipeline() {
         const numarHtml = item.status === 'done' ? `<input class="inline-input" style="width: 100px" value="${d.documentNumber || ''}" onchange="updateItem('${item.id}', 'documentNumber', this.value)">` : '-';
         const dataHtml = item.status === 'done' ? `<input class="inline-input" style="width: 110px" value="${d.documentDate || ''}" onchange="updateItem('${item.id}', 'documentDate', this.value)">` : '-';
         const cuiHtml = item.status === 'done' ? `<input class="inline-input" value="${d.cui || ''}" onchange="updateItem('${item.id}', 'cui', this.value)" title="${d.companyName || ''}">` : '-';
+        const companyHtml = item.status === 'done' ? `<input class="inline-input" style="width: 150px" value="${d.companyName || ''}" onchange="updateItem('${item.id}', 'companyName', this.value)">` : '-';
         
         const baseHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.baseAmount !== undefined ? d.baseAmount : ''}" onchange="updateItem('${item.id}', 'baseAmount', this.value)">` : '-';
         const totalHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
@@ -142,6 +143,7 @@ function renderPipeline() {
                 <td>${numarHtml}</td>
                 <td>${dataHtml}</td>
                 <td>${cuiHtml}</td>
+                <td>${companyHtml}</td>
                 <td>${baseHtml}</td>
                 <td>${vatHtml}</td>
                 <td>${vatPctHtml}</td>
