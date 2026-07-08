@@ -737,40 +737,137 @@ class CuiExtractorAgent: AccountingAgent {
         }
     }
 
-    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
-        func isBuyerBox(_ box: OCRBoxItem) -> Bool {
-            let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
-            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP"]
-            for kw in buyerKeywords {
-                if cleanText.contains(kw) { return true }
+    func cleanFallbackCandidate(_ rawText: String) -> String? {
+        let upper = rawText.uppercased()
+        var s = ""
+        for char in upper {
+            if char.isLetter || char.isNumber {
+                s.append(char)
             }
-            return false
         }
+        let prefixes = ["CIF", "CUI", "RO", "R0", "COD", "FISCAL", "CODFISCAL"]
+        var changed = true
+        while changed {
+            changed = false
+            for prefix in prefixes {
+                if s.hasPrefix(prefix) {
+                    s = String(s.dropFirst(prefix.count))
+                    changed = true
+                }
+            }
+        }
+        if s.count >= 2 && s.count <= 12 && s.contains(where: { $0.isNumber }) {
+            return s
+        }
+        return nil
+    }
 
+    func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
         let sortedHeights = boxes.map { $0.h }.sorted()
         let medianHeight = sortedHeights.isEmpty ? 15.0 : CGFloat(sortedHeights[sortedHeights.count / 2])
 
-        let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "RO", "R0", "IDENTIFICARE"]
+        func isBuyerCUIBoxLocal(_ box: OCRBoxItem) -> Bool {
+            let text = box.text.uppercased()
+            let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP", "C.N.P"]
+            
+            for kw in buyerKeywords {
+                if text.contains(kw) {
+                    return true
+                }
+            }
+            
+            for other in boxes {
+                if other.x == box.x && other.y == box.y { continue }
+                
+                let otherText = other.text.uppercased()
+                var hasBuyerKeyword = false
+                for kw in buyerKeywords {
+                    if otherText.contains(kw) {
+                        hasBuyerKeyword = true
+                        break
+                    }
+                }
+                if !hasBuyerKeyword { continue }
+                
+                let dy = box.y - other.y
+                let dx = box.x - other.x
+                
+                // Scenario 1: Same line, label to the left
+                if abs(dy) < Double(medianHeight) * 1.5 && dx > 0 && dx < Double(medianHeight) * 12.0 {
+                    return true
+                }
+                
+                // Scenario 2: Label is directly above
+                if dy > 0 && dy < Double(medianHeight) * 2.5 && abs(dx) < Double(medianHeight) * 6.0 {
+                    return true
+                }
+            }
+            
+            return false
+        }
+
+        func isPhoneOrPhoneLabelLocal(_ box: OCRBoxItem) -> Bool {
+            let text = box.text.uppercased()
+            let phoneLabels = ["TEL", "FAX", "MOBIL", "TELEFON"]
+            for label in phoneLabels {
+                if text.contains(label) {
+                    return true
+                }
+            }
+            
+            let digits = text.filter { $0.isNumber }
+            if digits.count == 10 && (digits.hasPrefix("07") || digits.hasPrefix("02") || digits.hasPrefix("03")) {
+                return true
+            }
+            
+            for other in boxes {
+                let otherText = other.text.uppercased()
+                var hasPhoneLabel = false
+                for label in phoneLabels {
+                    if otherText.contains(label) {
+                        hasPhoneLabel = true
+                        break
+                    }
+                }
+                if !hasPhoneLabel { continue }
+                
+                let dy = abs(box.y - other.y)
+                let dx = abs(box.x - other.x)
+                if dy < Double(medianHeight) * 1.5 && dx < Double(medianHeight) * 12.0 {
+                    return true
+                }
+            }
+            
+            return false
+        }
+
+        let cuiKeywords = ["CIF", "CUI", "CODFISCAL", "R0", "IDENTIFICARE"]
         var candidateBoxes: [OCRBoxItem] = []
         
         for box in boxes {
+            if isBuyerCUIBoxLocal(box) { continue }
+            if isPhoneOrPhoneLabelLocal(box) { continue }
             let cleanText = box.text.uppercased().replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
-            if isBuyerBox(box) { continue }
             
-            if cuiKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) }) {
+            var isCandidate = cuiKeywords.contains(where: { cleanText.contains($0) || (cleanText.count <= $0.count + 2 && cleanText.isFuzzyMatch($0, tolerance: 1)) })
+            if !isCandidate {
+                isCandidate = containsRefinedRo(box.text)
+            }
+            
+            if isCandidate {
                 candidateBoxes.append(box)
             }
         }
         
         for box in candidateBoxes {
             if box.text.contains("%") { continue }
-            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-            let numbersOnly = String(text.filter { $0.isNumber })
-            if isValidCUI(cui: numbersOnly) {
-                result.cui = numbersOnly
+            if isBuyerCUIBoxLocal(box) { continue }
+            if isPhoneOrPhoneLabelLocal(box) { continue }
+            if let cui = extractCUI(from: box.text) {
+                result.cui = cui
                 result.cuiRequiresVerification = false
-                await verifyWithANAF(cui: numbersOnly, result: &result)
-                result.cui = numbersOnly 
+                await verifyWithANAF(cui: cui, result: &result)
+                result.cui = cui 
                 return
             }
         }
@@ -787,13 +884,13 @@ class CuiExtractorAgent: AccountingAgent {
             
             for nb in nearbyBoxes {
                 if nb.text.contains("%") { continue }
-                let text = nb.text.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-                let numbersOnly = String(text.filter { $0.isNumber })
-                if isValidCUI(cui: numbersOnly) {
-                    result.cui = numbersOnly
+                if isBuyerCUIBoxLocal(nb) { continue }
+                if isPhoneOrPhoneLabelLocal(nb) { continue }
+                if let cui = extractCUI(from: nb.text) {
+                    result.cui = cui
                     result.cuiRequiresVerification = false
-                    await verifyWithANAF(cui: numbersOnly, result: &result)
-                    result.cui = numbersOnly
+                    await verifyWithANAF(cui: cui, result: &result)
+                    result.cui = cui
                     return
                 }
             }
@@ -801,16 +898,49 @@ class CuiExtractorAgent: AccountingAgent {
         
         for box in boxes {
             if box.text.contains("%") { continue }
-            if isBuyerBox(box) { continue }
-            let text = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ".", with: "")
-            let numbersOnly = String(text.filter { $0.isNumber })
-            if isValidCUI(cui: numbersOnly) {
-                result.cui = numbersOnly
+            if isBuyerCUIBoxLocal(box) { continue }
+            if isPhoneOrPhoneLabelLocal(box) { continue }
+            if let cui = extractCUI(from: box.text) {
+                result.cui = cui
                 result.cuiRequiresVerification = false
-                await verifyWithANAF(cui: numbersOnly, result: &result)
-                result.cui = numbersOnly
+                await verifyWithANAF(cui: cui, result: &result)
+                result.cui = cui
                 return
             }
+        }
+        
+        // Typo Fallback: extract alphanumeric sequences (length 2-12) from nearby boxes
+        var fallbackCandidates: [(text: String, dist: Double)] = []
+        for box in candidateBoxes {
+            if isBuyerCUIBoxLocal(box) { continue }
+            if isPhoneOrPhoneLabelLocal(box) { continue }
+            if let cleaned = cleanFallbackCandidate(box.text) {
+                fallbackCandidates.append((text: cleaned, dist: 0.0))
+            }
+        }
+        for keywordBox in candidateBoxes {
+            let nearby = boxes.filter {
+                let dist = sqrt(pow($0.x - keywordBox.x, 2) + pow($0.y - keywordBox.y, 2))
+                return dist < medianHeight * 5.0 && !($0.x == keywordBox.x && $0.y == keywordBox.y)
+            }
+            for nb in nearby {
+                if nb.text.contains("%") { continue }
+                if isBuyerCUIBoxLocal(nb) { continue }
+                if isPhoneOrPhoneLabelLocal(nb) { continue }
+                if let cleaned = cleanFallbackCandidate(nb.text) {
+                    let dist = sqrt(pow(nb.x - keywordBox.x, 2) + pow(nb.y - keywordBox.y, 2))
+                    fallbackCandidates.append((text: cleaned, dist: dist))
+                }
+            }
+        }
+        if !fallbackCandidates.isEmpty {
+            fallbackCandidates.sort { $0.dist < $1.dist }
+            let best = fallbackCandidates[0].text
+            result.cui = best
+            result.cuiRequiresVerification = true
+            await verifyWithANAF(cui: best, result: &result)
+            result.cui = best
+            return
         }
         
         result.cuiRequiresVerification = true
@@ -836,7 +966,8 @@ class FinancialAmountsAgent: AccountingAgent {
             let yTolerance = medianHeight * 0.4
             
             for box in sortedByY.dropFirst() {
-                if abs(box.y - currentLine[0].y) < yTolerance {
+                let avgY = currentLine.reduce(0.0) { $0 + $1.y } / Double(currentLine.count)
+                if abs(box.y - avgY) < yTolerance {
                     currentLine.append(box)
                 } else {
                     lines.append(currentLine)
@@ -878,14 +1009,13 @@ class FinancialAmountsAgent: AccountingAgent {
                 }
                 
                 for cand in candidates.prefix(8) {
-                    let sanitized = cand.text.replacingOccurrences(of: ",", with: ".")
-                    let pattern = "([0-9]+[.][0-9]{2})"
+                    let pattern = "([0-9]{1,3}(?:[.,\\s][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)"
                     if let regex = try? NSRegularExpression(pattern: pattern, options: []),
-                       let match = regex.firstMatch(in: sanitized, options: [], range: NSRange(location: 0, length: sanitized.utf16.count)) {
-                        let matchedString = (sanitized as NSString).substring(with: match.range(at: 1))
-                        if let val = Double(matchedString), val > 1.0 {
+                       let match = regex.firstMatch(in: cand.text, options: [], range: NSRange(location: 0, length: cand.text.utf16.count)) {
+                        let matchedString = (cand.text as NSString).substring(with: match.range(at: 1))
+                        if let val = parseFormattedAmount(matchedString), val > 1.0 {
                             // Sanity: skip if the number is likely a percentage (21.00, etc)
-                            if val == 21.00 || val == 19.00 || val == 11.00 || val == 9.00 || val == 5.00 { continue }
+                            if val == 21.0 || val == 19.0 || val == 11.0 || val == 9.0 || val == 5.0 { continue }
                             result.totalAmount = val
                             result.totalRequiresVerification = false
                             totalFound = true
@@ -899,11 +1029,11 @@ class FinancialAmountsAgent: AccountingAgent {
         
         // Fallback TOTAL
         if !totalFound {
-            let totalPattern = "(?i)(?:TOTAL|SUMA|ACHITAT|REST)\\s*(?:LEI)?\\s*[:=]*\\s*([0-9]+[.,][0-9]{2})"
+            let totalPattern = "(?i)(?:TOTAL|SUMA|ACHITAT)[ \\t]*(?:LEI)?[ \\t]*[:=]*[ \\t]*([0-9]{1,3}(?:[.,\\s][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)"
             if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
                let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
                 let matchedString = (fullText as NSString).substring(with: match.range(at: 1))
-                if let val = Double(matchedString.replacingOccurrences(of: ",", with: ".")) {
+                if let val = parseFormattedAmount(matchedString) {
                     result.totalAmount = val
                     result.totalRequiresVerification = false
                     totalFound = true
@@ -913,14 +1043,14 @@ class FinancialAmountsAgent: AccountingAgent {
         
         // Final Fallback: largest number
         if result.totalAmount == nil {
-            let pattern = "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)"
+            let pattern = "(?<!%)\\b([0-9]{1,3}(?:[.,\\s][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)\\b(?!\\s*%)"
             if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
                 let nsString = fullText as NSString
                 let results = regex.matches(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
                 var amounts: [Double] = []
                 for match in results {
-                    let matchedString = nsString.substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(matchedString), val != 24.00, val != 21.00, val != 19.00, val != 11.00, val != 9.00, val != 5.00, val != 0.00 {
+                    let matchedString = nsString.substring(with: match.range(at: 1))
+                    if let val = parseFormattedAmount(matchedString), val != 24.0, val != 21.0, val != 19.0, val != 11.0, val != 9.0, val != 5.0, val != 0.0 {
                         amounts.append(val)
                     }
                 }
@@ -956,13 +1086,13 @@ class FinancialAmountsAgent: AccountingAgent {
             }
             
             // 2. GATHER ALL DECIMAL AMOUNTS FROM THE DOCUMENT
-            let decPattern = "(?<!%)\\b([0-9]+[.,][0-9]{2})\\b(?!\\s*%)"
+            let decPattern = "(?<!%)\\b([0-9]{1,3}(?:[.,\\s][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)\\b(?!\\s*%)"
             var allVals: [Double] = []
             if let decRegex = try? NSRegularExpression(pattern: decPattern, options: []) {
                 let matches = decRegex.matches(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count))
                 for match in matches {
-                    let valStr = (fullText as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
-                    if let val = Double(valStr), !allVals.contains(val) {
+                    let valStr = (fullText as NSString).substring(with: match.range(at: 1))
+                    if let val = parseFormattedAmount(valStr), !allVals.contains(val) {
                         allVals.append(val)
                     }
                 }
@@ -1027,10 +1157,10 @@ class FinancialAmountsAgent: AccountingAgent {
                                 }
                             for closest in nearby.prefix(10) {
                                 let sanitized = closest.text.replacingOccurrences(of: " ", with: "")
-                                if let decRegex = try? NSRegularExpression(pattern: "([0-9]+[.,][0-9]{2})", options: []),
+                                if let decRegex = try? NSRegularExpression(pattern: "([0-9]{1,3}(?:[.,\\s][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)", options: []),
                                    let match = decRegex.firstMatch(in: sanitized, options: [], range: NSRange(location: 0, length: sanitized.utf16.count)) {
-                                    let valStr = (sanitized as NSString).substring(with: match.range(at: 1)).replacingOccurrences(of: ",", with: ".")
-                                    if let val = Double(valStr), val > 0 && val < total * 0.3 {
+                                    let valStr = (sanitized as NSString).substring(with: match.range(at: 1))
+                                    if let val = parseFormattedAmount(valStr), val > 0 && val < total * 0.3 {
                                         breakdowns.append(VatBreakdown(percentage: "Mixt", vatAmount: val, baseAmount: ((total - val) * 100).rounded() / 100))
                                         break
                                     }
@@ -1162,48 +1292,127 @@ class AccountingValidationAgent: AccountingAgent {
         addSpecificWarnings(result: &result, fullText: fullText)
     }
     
+    private func getYearFromDate(_ dateStr: String) -> Int? {
+        let components = dateStr.components(separatedBy: CharacterSet(charactersIn: ".-/"))
+        if let last = components.last?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let year = Int(last) {
+            if last.count == 2 {
+                if year <= 50 {
+                    return 2000 + year
+                } else {
+                    return 1900 + year
+                }
+            } else if last.count == 4 {
+                return year
+            }
+        }
+        return nil
+    }
+
     // Corectie automata cote TVA vechi -> cote 2026
     private func correctVatRates(result: inout AccountingResult, fullText: String) {
+        if let dateStr = result.documentDate {
+            if let year = getYearFromDate(dateStr), year <= 2024 {
+                return
+            }
+        }
+        
         guard let vatPct = result.vatPercentages else { return }
         
-        // Detecteaza cota veche de 19% -> corectie la 21%
-        if vatPct.contains("19%") {
-            let oldVat = result.vatAmount ?? 0
-            if let total = result.totalAmount, oldVat > 0 {
-                // Recalculeaza cu 21%
-                let newBase = (total / 1.21 * 100).rounded() / 100
-                let newVat = ((total - newBase) * 100).rounded() / 100
-                result.baseAmount = newBase
-                result.vatAmount = newVat
-                result.vatPercentages = "21%"
-                result.fiscalWarnings.append("Corecție automată: Cota TVA 19% (veche) a fost recalculată la 21% (cota 2026). Verificați dacă bonul e din 2025+.")
+        if var breakdowns = result.vatBreakdowns, !breakdowns.isEmpty {
+            var updatedBreakdowns: [VatBreakdown] = []
+            var updatedPercentages: [String] = []
+            var correctedAny = false
+            
+            for b in breakdowns {
+                var newPct = b.percentage
+                var newBase = b.baseAmount
+                var newVat = b.vatAmount
+                
+                if b.percentage == "19%" {
+                    newPct = "21%"
+                    let total = b.baseAmount + b.vatAmount
+                    newBase = (total / 1.21 * 100).rounded() / 100
+                    newVat = ((total - newBase) * 100).rounded() / 100
+                    correctedAny = true
+                    result.fiscalWarnings.append("Corecție automată: Cota TVA 19% (veche) a fost recalculată la 21% (cota 2026). Verificați dacă bonul e din 2025+.")
+                } else if b.percentage == "5%" {
+                    newPct = "11%"
+                    let total = b.baseAmount + b.vatAmount
+                    newBase = (total / 1.11 * 100).rounded() / 100
+                    newVat = ((total - newBase) * 100).rounded() / 100
+                    correctedAny = true
+                    result.fiscalWarnings.append("Corecție automată: Cota TVA 5% (veche) a fost recalculată la 11% (cota 2026).")
+                } else if b.percentage == "9%" {
+                    let isHousing = fullText.contains("LOCUINT") || fullText.contains("APARTAMENT") || fullText.contains("IMOBIL")
+                    if !isHousing {
+                        newPct = "11%"
+                        let total = b.baseAmount + b.vatAmount
+                        newBase = (total / 1.11 * 100).rounded() / 100
+                        newVat = ((total - newBase) * 100).rounded() / 100
+                        correctedAny = true
+                        result.fiscalWarnings.append("Corecție automată: Cota TVA 9% este valabilă doar pentru locuințe noi (până la 31.07.2026). Recalculat la 11%.")
+                    }
+                }
+                
+                updatedBreakdowns.append(VatBreakdown(percentage: newPct, vatAmount: newVat, baseAmount: newBase))
+                updatedPercentages.append(newPct)
             }
-        }
-        
-        // Detecteaza cota veche de 5% -> corectie la 11%
-        if vatPct.contains("5%") && !vatPct.contains("15%") && !vatPct.contains("25%") {
-            if let total = result.totalAmount {
-                let newBase = (total / 1.11 * 100).rounded() / 100
-                let newVat = ((total - newBase) * 100).rounded() / 100
-                result.baseAmount = newBase
-                result.vatAmount = newVat
-                result.vatPercentages = "11%"
-                result.fiscalWarnings.append("Corecție automată: Cota TVA 5% (veche) a fost recalculată la 11% (cota 2026).")
+            
+            if correctedAny {
+                result.vatBreakdowns = updatedBreakdowns
+                let totalBase = updatedBreakdowns.reduce(0.0) { $0 + $1.baseAmount }
+                let totalVat = updatedBreakdowns.reduce(0.0) { $0 + $1.vatAmount }
+                result.baseAmount = totalBase
+                result.vatAmount = totalVat
+                var uniquePercentages: [String] = []
+                for p in updatedPercentages {
+                    if !uniquePercentages.contains(p) {
+                        uniquePercentages.append(p)
+                    }
+                }
+                result.vatPercentages = uniquePercentages.joined(separator: ", ")
             }
-        }
-        
-        // Detecteaza cota de 9% pe NON-locuinte -> corectie la 11%
-        // (9% e valid DOAR pentru locuinte noi pana la 31.07.2026)
-        if vatPct == "9%" {
-            let isHousing = fullText.contains("LOCUINT") || fullText.contains("APARTAMENT") || fullText.contains("IMOBIL")
-            if !isHousing {
+        } else {
+            // Detecteaza cota veche de 19% -> corectie la 21%
+            if vatPct.contains("19%") {
+                let oldVat = result.vatAmount ?? 0
+                if let total = result.totalAmount, oldVat > 0 {
+                    // Recalculeaza cu 21%
+                    let newBase = (total / 1.21 * 100).rounded() / 100
+                    let newVat = ((total - newBase) * 100).rounded() / 100
+                    result.baseAmount = newBase
+                    result.vatAmount = newVat
+                    result.vatPercentages = "21%"
+                    result.fiscalWarnings.append("Corecție automată: Cota TVA 19% (veche) a fost recalculată la 21% (cota 2026). Verificați dacă bonul e din 2025+.")
+                }
+            }
+            
+            // Detecteaza cota veche de 5% -> corectie la 11%
+            if vatPct.contains("5%") && !vatPct.contains("15%") && !vatPct.contains("25%") {
                 if let total = result.totalAmount {
                     let newBase = (total / 1.11 * 100).rounded() / 100
                     let newVat = ((total - newBase) * 100).rounded() / 100
                     result.baseAmount = newBase
                     result.vatAmount = newVat
                     result.vatPercentages = "11%"
-                    result.fiscalWarnings.append("Corecție automată: Cota TVA 9% este valabilă doar pentru locuințe noi (până la 31.07.2026). Recalculat la 11%.")
+                    result.fiscalWarnings.append("Corecție automată: Cota TVA 5% (veche) a fost recalculată la 11% (cota 2026).")
+                }
+            }
+            
+            // Detecteaza cota de 9% pe NON-locuinte -> corectie la 11%
+            // (9% e valid DOAR pentru locuinte noi pana la 31.07.2026)
+            if vatPct == "9%" {
+                let isHousing = fullText.contains("LOCUINT") || fullText.contains("APARTAMENT") || fullText.contains("IMOBIL")
+                if !isHousing {
+                    if let total = result.totalAmount {
+                        let newBase = (total / 1.11 * 100).rounded() / 100
+                        let newVat = ((total - newBase) * 100).rounded() / 100
+                        result.baseAmount = newBase
+                        result.vatAmount = newVat
+                        result.vatPercentages = "11%"
+                        result.fiscalWarnings.append("Corecție automată: Cota TVA 9% este valabilă doar pentru locuințe noi (până la 31.07.2026). Recalculat la 11%.")
+                    }
                 }
             }
         }
@@ -1328,9 +1537,7 @@ class AccountingValidationAgent: AccountingAgent {
         
         // Verificare data bon — daca e din 2024 sau inainte, cotele vechi erau corecte
         if let dateStr = result.documentDate {
-            let yearPattern = "20(2[0-4])"
-            if let regex = try? NSRegularExpression(pattern: yearPattern, options: []),
-               regex.firstMatch(in: dateStr, options: [], range: NSRange(location: 0, length: dateStr.utf16.count)) != nil {
+            if let year = getYearFromDate(dateStr), year <= 2024 {
                 // Bonul e din 2024 sau mai devreme -> cotele vechi (19%, 9%, 5%) erau corecte
                 // Stergem warning-urile de corectie automata daca exista
                 result.fiscalWarnings = result.fiscalWarnings.filter { !$0.contains("Corecție automată: Cota TVA") }
@@ -1357,7 +1564,8 @@ public class AccountingOrchestrator {
             let yTolerance = medianHeight * 0.4
             
             for box in sortedByY.dropFirst() {
-                if abs(box.y - currentLine[0].y) < yTolerance {
+                let avgY = currentLine.reduce(0.0) { $0 + $1.y } / Double(currentLine.count)
+                if abs(box.y - avgY) < yTolerance {
                     currentLine.append(box)
                 } else {
                     lines.append(currentLine)
@@ -1409,28 +1617,7 @@ public class AccountingOrchestrator {
         return [result]
     }
     
-    private func extractCUI(from text: String) -> String? {
-        let clean = text.uppercased()
-            .replacingOccurrences(of: " ", with: "")
-            .replacingOccurrences(of: ".", with: "")
-            .replacingOccurrences(of: ":", with: "")
-            .replacingOccurrences(of: "-", with: "")
-        
-        let pattern = "[0-9]{2,10}"
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
-        let nsStr = clean as NSString
-        let matches = regex.matches(in: clean, options: [], range: NSRange(location: 0, length: nsStr.length))
-        
-        for match in matches {
-            let candidate = nsStr.substring(with: match.range)
-            if isValidCUI(cui: candidate) {
-                return candidate
-            }
-        }
-        return nil
-    }
-    
-    private func isBuyerCUIBox(_ box: OCRBoxItem, in boxes: [OCRBoxItem], medianHeight: CGFloat) -> Bool {
+    func isBuyerCUIBox(_ box: OCRBoxItem, in boxes: [OCRBoxItem], medianHeight: CGFloat) -> Bool {
         let text = box.text.uppercased()
         let buyerKeywords = ["CLIENT", "CUMP", "BENEF", "CNP", "C.N.P"]
         
@@ -1525,7 +1712,46 @@ public class AccountingOrchestrator {
     func clusterBoxes(_ boxes: [OCRBoxItem]) -> [[OCRBoxItem]] {
         guard boxes.count > 1 else { return [boxes] }
         
-        let sortedHeights = boxes.map { $0.h }.sorted()
+        // === 1. Skew Angle & Deskewing ===
+        var angles: [Double] = []
+        for box in boxes {
+            if let rect = box.rect {
+                let theta_i = atan2(rect.topRight_y - rect.topLeft_y, rect.topRight_x - rect.topLeft_x)
+                angles.append(theta_i)
+            } else {
+                angles.append(0.0)
+            }
+        }
+        let sortedAngles = angles.sorted()
+        let theta = sortedAngles.isEmpty ? 0.0 : sortedAngles[sortedAngles.count / 2]
+        
+        let cosT = cos(-theta)
+        let sinT = sin(-theta)
+        let deskewedBoxes = boxes.map { box -> OCRBoxItem in
+            let cx = box.x + box.w / 2.0
+            let cy = box.y + box.h / 2.0
+            let cxPrime = cx * cosT - cy * sinT
+            let cyPrime = cx * sinT + cy * cosT
+            let newX = cxPrime - box.w / 2.0
+            let newY = cyPrime - box.h / 2.0
+            
+            var newRect: OCRRectItem? = nil
+            if let r = box.rect {
+                newRect = OCRRectItem(
+                    topLeft_x: r.topLeft_x * cosT - r.topLeft_y * sinT,
+                    topLeft_y: r.topLeft_x * sinT + r.topLeft_y * cosT,
+                    topRight_x: r.topRight_x * cosT - r.topRight_y * sinT,
+                    topRight_y: r.topRight_x * sinT + r.topRight_y * cosT,
+                    bottomLeft_x: r.bottomLeft_x * cosT - r.bottomLeft_y * sinT,
+                    bottomLeft_y: r.bottomLeft_x * sinT + r.bottomLeft_y * cosT,
+                    bottomRight_x: r.bottomRight_x * cosT - r.bottomRight_y * sinT,
+                    bottomRight_y: r.bottomRight_x * sinT + r.bottomRight_y * cosT
+                )
+            }
+            return OCRBoxItem(text: box.text, x: newX, y: newY, w: box.w, h: box.h, rect: newRect)
+        }
+        
+        let sortedHeights = deskewedBoxes.map { $0.h }.sorted()
         let medianHeight = Double(sortedHeights[sortedHeights.count / 2])
         
         // === STOCARE PENTRU /debug_boxes ===
@@ -1533,237 +1759,253 @@ public class AccountingOrchestrator {
             struct BoxDump: Codable {
                 let text: String; let x: Double; let y: Double; let w: Double; let h: Double
             }
-            let dumpBoxes = boxes.map { BoxDump(text: $0.text, x: $0.x, y: $0.y, w: $0.w, h: $0.h) }
+            let dumpBoxes = deskewedBoxes.map { BoxDump(text: $0.text, x: $0.x, y: $0.y, w: $0.w, h: $0.h) }
             let encoder = JSONEncoder()
             encoder.outputFormatting = .prettyPrinted
             let jsonData = try encoder.encode(dumpBoxes)
             AccountingOrchestrator.shared.lastBoxesJson = jsonData
         } catch {}
         
-        print("[CLUSTER] === START === boxes=\(boxes.count), medianHeight=\(medianHeight)")
+        print("[CLUSTER] === START === boxes=\(deskewedBoxes.count), medianHeight=\(medianHeight), theta=\(theta)")
         
-        // =====================================================================
-        // HELPER FUNCTIONS
-        // =====================================================================
-        
+        // === 2. Identify CUI/CIF Anchors (using deskewed coordinates) ===
         func isBuyerText(_ text: String) -> Bool {
             let t = text.uppercased()
             return t.contains("CLIENT") || t.contains("CUMP") || t.contains("BENEF") || t.contains("CNP")
         }
         
-        // Sortare finala: pe Y apoi pe X
-        func sortClusters(_ clusters: inout [[OCRBoxItem]]) {
-            clusters.sort {
-                let y0 = $0.map { $0.y }.min() ?? 0
-                let y1 = $1.map { $0.y }.min() ?? 0
-                let x0 = $0.map { $0.x }.min() ?? 0
-                let x1 = $1.map { $0.x }.min() ?? 0
-                if abs(y0 - y1) < medianHeight * 5.0 { return x0 < x1 }
-                return y0 < y1
-            }
-        }
-        
-        // =====================================================================
-        // FIND CUI ANCHORS
-        // =====================================================================
-        
-        var cuiAnchors: [OCRBoxItem] = []
-        
-        for box in boxes {
-            if isBuyerText(box.text) { continue }
+        func isCuiAnchor(_ box: OCRBoxItem) -> Bool {
+            if isBuyerText(box.text) { return false }
             let upper = box.text.uppercased()
-                .replacingOccurrences(of: " ", with: "")
-                .replacingOccurrences(of: ".", with: "")
-            if upper.contains("CODFISCAL") || upper.contains("CODIDENTIFICARE") || upper.contains("IDENTIFICAREFISCALA") {
-                let numbersOnly = box.text.filter { $0.isNumber }
-                if numbersOnly.count >= 5 {
-                    var dup = false
-                    for e in cuiAnchors {
-                        if abs(e.x - box.x) < medianHeight * 3 && abs(e.y - box.y) < medianHeight * 2 {
-                            dup = true; break
+            if upper.contains("%") { return false }
+            
+            // Check if it has seller keywords
+            let sellerKeywords = ["CIF", "CUI", "CODFISCAL", "FISCAL", "COD FISCAL"]
+            let cleanText = upper.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: " ", with: "")
+            for kw in sellerKeywords {
+                let cleanKw = kw.replacingOccurrences(of: " ", with: "")
+                if cleanText.contains(cleanKw) {
+                    return true
+                }
+            }
+            
+            // Or contains valid CUI and not a buyer box
+            if let cui = extractCUI(from: box.text) {
+                if !isBuyerCUIBox(box, in: deskewedBoxes, medianHeight: CGFloat(medianHeight)) {
+                    return true
+                }
+            }
+            return false
+        }
+        
+        var rawAnchors: [OCRBoxItem] = []
+        for box in deskewedBoxes {
+            if isCuiAnchor(box) {
+                rawAnchors.append(box)
+            }
+        }
+        
+        // Deduplicate anchors close to each other
+        var cuiAnchors: [OCRBoxItem] = []
+        for a in rawAnchors {
+            var isDup = false
+            for u in cuiAnchors {
+                let dx = abs(u.x - a.x)
+                let dy = abs(u.y - a.y)
+                if dx < medianHeight * 5.0 && dy < medianHeight * 3.0 {
+                    isDup = true
+                    break
+                }
+            }
+            if !isDup {
+                cuiAnchors.append(a)
+                print("[CLUSTER] Anchor: '\(a.text)' x=\(Int(a.x)) y=\(Int(a.y))")
+            }
+        }
+        print("[CLUSTER] Total unique anchors: \(cuiAnchors.count)")
+        
+        // === 3. Graph-Based (Single-Linkage) Clustering ===
+        struct Point {
+            let x: Double
+            let y: Double
+        }
+        
+        func getCorners(_ box: OCRBoxItem) -> [Point] {
+            if let r = box.rect {
+                return [
+                    Point(x: r.topLeft_x, y: r.topLeft_y),
+                    Point(x: r.topRight_x, y: r.topRight_y),
+                    Point(x: r.bottomLeft_x, y: r.bottomLeft_y),
+                    Point(x: r.bottomRight_x, y: r.bottomRight_y)
+                ]
+            } else {
+                return [
+                    Point(x: box.x, y: box.y),
+                    Point(x: box.x + box.w, y: box.y),
+                    Point(x: box.x, y: box.y + box.h),
+                    Point(x: box.x + box.w, y: box.y + box.h)
+                ]
+            }
+        }
+        
+        let n = deskewedBoxes.count
+        var cornersList = deskewedBoxes.map { getCorners($0) }
+        
+        var minCornerDist = [[Double]](repeating: [Double](repeating: 0.0, count: n), count: n)
+        var adj = [[Int]](repeating: [], count: n)
+        
+        let distThreshold = 4.0 * medianHeight
+        
+        for i in 0..<n {
+            for j in (i+1)..<n {
+                var dMin = Double.infinity
+                for p1 in cornersList[i] {
+                    for p2 in cornersList[j] {
+                        let d = sqrt(pow(p1.x - p2.x, 2) + pow(p1.y - p2.y, 2))
+                        if d < dMin {
+                            dMin = d
                         }
                     }
-                    if !dup {
-                        cuiAnchors.append(box)
-                        print("[CLUSTER] CUI anchor: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
-                    }
+                }
+                minCornerDist[i][j] = dMin
+                minCornerDist[j][i] = dMin
+                
+                if dMin < distThreshold {
+                    adj[i].append(j)
+                    adj[j].append(i)
                 }
             }
         }
         
-        // "CIF" standalone
-        for box in boxes {
-            if isBuyerText(box.text) { continue }
-            let trimmed = box.text.uppercased().trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: ".", with: "")
-            if trimmed == "CIF" || trimmed == "C I F" || trimmed == "CIF:" {
-                for box2 in boxes {
-                    if abs(box2.x - box.x) < medianHeight * 2 {
-                        let hasLongNumber = box2.text.replacingOccurrences(of: " ", with: "")
-                            .filter { $0.isNumber }.count >= 7
-                        if hasLongNumber {
-                            var dup = false
-                            for e in cuiAnchors {
-                                if abs(e.x - box.x) < medianHeight * 3 && abs(e.y - box.y) < medianHeight * 2 {
-                                    dup = true; break
-                                }
+        // Find connected components using BFS
+        var visited = [Bool](repeating: false, count: n)
+        var components: [[Int]] = []
+        
+        for i in 0..<n {
+            if !visited[i] {
+                var comp: [Int] = []
+                var q: [Int] = [i]
+                visited[i] = true
+                
+                var head = 0
+                while head < q.count {
+                    let u = q[head]
+                    head += 1
+                    comp.append(u)
+                    
+                    for v in adj[u] {
+                        if !visited[v] {
+                            visited[v] = true
+                            q.append(v)
+                        }
+                    }
+                }
+                components.append(comp)
+            }
+        }
+        
+        // === 4. Partition components with multiple anchors using Dijkstra ===
+        var finalClusters: [[OCRBoxItem]] = []
+        
+        for comp in components {
+            // Find which anchors are in this component
+            var compAnchors: [Int] = []
+            for node in comp {
+                let box = deskewedBoxes[node]
+                if cuiAnchors.contains(where: { $0.x == box.x && $0.y == box.y && $0.text == box.text }) {
+                    compAnchors.append(node)
+                }
+            }
+            
+            if compAnchors.count <= 1 {
+                let clusterBoxes = comp.map { deskewedBoxes[$0] }
+                finalClusters.append(clusterBoxes)
+            } else {
+                // Multi-source Dijkstra partitioning
+                var dist = [Int: Double]()
+                var owner = [Int: Int]()
+                
+                for node in comp {
+                    dist[node] = Double.infinity
+                    owner[node] = -1
+                }
+                
+                // Initialize anchors
+                for (m, anchorNode) in compAnchors.enumerated() {
+                    dist[anchorNode] = 0.0
+                    owner[anchorNode] = m
+                }
+                
+                var queue = Set(comp)
+                while !queue.isEmpty {
+                    var u: Int? = nil
+                    var minDist = Double.infinity
+                    for node in queue {
+                        if let d = dist[node], d < minDist {
+                            minDist = d
+                            u = node
+                        }
+                    }
+                    
+                    guard let uNode = u else { break }
+                    queue.remove(uNode)
+                    
+                    let uOwner = owner[uNode]!
+                    let uDist = dist[uNode]!
+                    
+                    for v in adj[uNode] {
+                        if queue.contains(v) {
+                            let weight = minCornerDist[uNode][v]
+                            let alt = uDist + weight
+                            if let vDist = dist[v], alt < vDist {
+                                dist[v] = alt
+                                owner[v] = uOwner
                             }
-                            if !dup {
-                                cuiAnchors.append(box)
-                                print("[CLUSTER] CIF standalone: '\(box.text)' x=\(Int(box.x)) y=\(Int(box.y))")
-                            }
-                            break
                         }
+                    }
+                }
+                
+                // Group nodes by owner
+                var partitioned = [[Int]](repeating: [], count: compAnchors.count)
+                for node in comp {
+                    let own = owner[node] ?? 0
+                    let index = (own >= 0 && own < compAnchors.count) ? own : 0
+                    partitioned[index].append(node)
+                }
+                
+                for subComp in partitioned {
+                    if !subComp.isEmpty {
+                        let clusterBoxes = subComp.map { deskewedBoxes[$0] }
+                        finalClusters.append(clusterBoxes)
                     }
                 }
             }
         }
         
-        print("[CLUSTER] Found \(cuiAnchors.count) CUI anchors")
-        
-        // =====================================================================
-        // RECURSIVE BISECTION CLUSTERING
-        // Splits box groups along the axis where CUI anchors have the largest
-        // gap, using actual box position gaps rather than midpoints.
-        // Works universally: rotated, 2D grids, single columns, any layout.
-        // =====================================================================
-        
-        if cuiAnchors.count > 1 {
-            
-            func getAnchorsIn(_ group: [OCRBoxItem]) -> [OCRBoxItem] {
-                return cuiAnchors.filter { anchor in
-                    group.contains { $0.x == anchor.x && $0.y == anchor.y && $0.text == anchor.text }
-                }
-            }
-            
-            func findBestGapSplit(_ group: [OCRBoxItem], axis: String) -> Double? {
-                let anchorsInGroup = getAnchorsIn(group)
-                if anchorsInGroup.count < 2 { return nil }
-                
-                let centers: [Double]
-                let anchorPositions: [Double]
-                
-                if axis == "x" {
-                    centers = group.map { $0.x + $0.w / 2.0 }.sorted()
-                    anchorPositions = anchorsInGroup.map { $0.x + $0.w / 2.0 }
-                } else {
-                    centers = group.map { $0.y + $0.h / 2.0 }.sorted()
-                    anchorPositions = anchorsInGroup.map { $0.y + $0.h / 2.0 }
-                }
-                
-                var bestGap: Double = 0
-                var bestSplit: Double? = nil
-                
-                for i in 1..<centers.count {
-                    let gap = centers[i] - centers[i - 1]
-                    if gap <= bestGap { continue }
-                    
-                    let splitPoint = (centers[i - 1] + centers[i]) / 2.0
-                    
-                    let leftAnchors = anchorPositions.filter { $0 < splitPoint }.count
-                    let rightAnchors = anchorPositions.filter { $0 >= splitPoint }.count
-                    
-                    if leftAnchors > 0 && rightAnchors > 0 {
-                        bestGap = gap
-                        bestSplit = splitPoint
-                    }
-                }
-                
-                return bestSplit
-            }
-            
-            func recursiveSplit(_ group: [OCRBoxItem], depth: Int = 0) -> [[OCRBoxItem]] {
-                let anchorsInGroup = getAnchorsIn(group)
-                
-                if anchorsInGroup.count <= 1 {
-                    return [group]
-                }
-                
-                let splitX = findBestGapSplit(group, axis: "x")
-                let splitY = findBestGapSplit(group, axis: "y")
-                
-                func gapSize(_ group: [OCRBoxItem], _ axis: String, _ splitPoint: Double?) -> Double {
-                    guard let sp = splitPoint else { return 0 }
-                    let centers: [Double]
-                    if axis == "x" {
-                        centers = group.map { $0.x + $0.w / 2.0 }.sorted()
-                    } else {
-                        centers = group.map { $0.y + $0.h / 2.0 }.sorted()
-                    }
-                    let leftMax = centers.filter { $0 < sp }.max() ?? sp
-                    let rightMin = centers.filter { $0 >= sp }.min() ?? sp
-                    return rightMin - leftMax
-                }
-                
-                var gapX = gapSize(group, "x", splitX)
-                var gapY = gapSize(group, "y", splitY)
-                
-                var finalSplitX = splitX
-                var finalSplitY = splitY
-                
-                // Fallback: midpoint between most distant anchors
-                if gapX == 0 && gapY == 0 {
-                    let anchorXs = anchorsInGroup.map { $0.x + $0.w / 2.0 }.sorted()
-                    let anchorYs = anchorsInGroup.map { $0.y + $0.h / 2.0 }.sorted()
-                    let xSpread = (anchorXs.last ?? 0) - (anchorXs.first ?? 0)
-                    let ySpread = (anchorYs.last ?? 0) - (anchorYs.first ?? 0)
-                    
-                    if xSpread >= ySpread {
-                        var bestG = 0.0
-                        for i in 1..<anchorXs.count {
-                            let g = anchorXs[i] - anchorXs[i - 1]
-                            if g > bestG { bestG = g; finalSplitX = (anchorXs[i - 1] + anchorXs[i]) / 2.0 }
-                        }
-                        gapX = bestG
-                    } else {
-                        var bestG = 0.0
-                        for i in 1..<anchorYs.count {
-                            let g = anchorYs[i] - anchorYs[i - 1]
-                            if g > bestG { bestG = g; finalSplitY = (anchorYs[i - 1] + anchorYs[i]) / 2.0 }
-                        }
-                        gapY = bestG
-                    }
-                }
-                
-                let left: [OCRBoxItem]
-                let right: [OCRBoxItem]
-                
-                if gapX >= gapY, let sp = finalSplitX {
-                    print("[CLUSTER] Depth \(depth): Split on X at \(Int(sp)) (gap=\(Int(gapX)))")
-                    left = group.filter { $0.x + $0.w / 2.0 < sp }
-                    right = group.filter { $0.x + $0.w / 2.0 >= sp }
-                } else if let sp = finalSplitY {
-                    print("[CLUSTER] Depth \(depth): Split on Y at \(Int(sp)) (gap=\(Int(gapY)))")
-                    left = group.filter { $0.y + $0.h / 2.0 < sp }
-                    right = group.filter { $0.y + $0.h / 2.0 >= sp }
-                } else {
-                    return [group]
-                }
-                
-                var result: [[OCRBoxItem]] = []
-                if !left.isEmpty { result.append(contentsOf: recursiveSplit(left, depth: depth + 1)) }
-                if !right.isEmpty { result.append(contentsOf: recursiveSplit(right, depth: depth + 1)) }
-                return result
-            }
-            
-            var clusters = recursiveSplit(boxes)
-            clusters = clusters.filter { $0.count >= 3 }
-            
-            if clusters.count > 1 {
-                sortClusters(&clusters)
-                print("[CLUSTER] === DONE (Recursive Bisection) === Returning \(clusters.count) clusters")
-                for (i, c) in clusters.enumerated() {
-                    let minY = c.map { $0.y }.min() ?? 0
-                    let minX = c.map { $0.x }.min() ?? 0
-                    print("[CLUSTER]   Cluster \(i): \(c.count) boxes, topLeft=(\(Int(minX)),\(Int(minY)))")
-                }
-                return clusters
-            }
+        var filteredClusters = finalClusters.filter { $0.count >= 3 }
+        if filteredClusters.isEmpty {
+            filteredClusters = [deskewedBoxes]
         }
         
-        // Single receipt or no CUI anchors - return all as one cluster
-        print("[CLUSTER] === DONE === No splitting needed, returning all as 1 cluster")
-        return [boxes]
+        filteredClusters.sort { c1, c2 in
+            let y1 = c1.map { $0.y }.min() ?? 0.0
+            let y2 = c2.map { $0.y }.min() ?? 0.0
+            let x1 = c1.map { $0.x }.min() ?? 0.0
+            let x2 = c2.map { $0.x }.min() ?? 0.0
+            if abs(y1 - y2) < medianHeight * 5.0 {
+                return x1 < x2
+            }
+            return y1 < y2
+        }
+        
+        print("[CLUSTER] === DONE (Single-Linkage Graph) === Returning \(filteredClusters.count) clusters")
+        for (i, c) in filteredClusters.enumerated() {
+            let minY = c.map { $0.y }.min() ?? 0.0
+            let minX = c.map { $0.x }.min() ?? 0.0
+            print("[CLUSTER]   Cluster \(i): \(c.count) boxes, topLeft=(\(Int(minX)),\(Int(minY)))")
+        }
+        
+        return filteredClusters
     }
 }
 
@@ -1795,6 +2037,13 @@ func isValidCUI(cui: String) -> Bool {
     guard cui.count >= 2 && cui.count <= 10 else { return false }
     guard let _ = Int(cui) else { return false }
     
+    // Ignore 10-digit numbers starting with "07", "02", or "03" (phone numbers)
+    if cui.count == 10 {
+        if cui.hasPrefix("07") || cui.hasPrefix("02") || cui.hasPrefix("03") {
+            return false
+        }
+    }
+    
     let controlKey = "753217532"
     let controlKeyReversed = String(controlKey.reversed())
     let cuiReversed = String(cui.reversed())
@@ -1817,4 +2066,68 @@ func isValidCUI(cui: String) -> Bool {
     let finalControlDigit = calcControlDigit == 10 ? 0 : calcControlDigit
     
     return finalControlDigit == controlDigit
+}
+
+func containsRefinedRo(_ text: String) -> Bool {
+    let upper = text.uppercased()
+    let pattern = "\\bRO\\d+|\\bRO\\b"
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return false }
+    let range = NSRange(location: 0, length: upper.utf16.count)
+    return regex.firstMatch(in: upper, options: [], range: range) != nil
+}
+
+func extractCUI(from text: String) -> String? {
+    let clean = text.uppercased()
+        .replacingOccurrences(of: " ", with: "")
+        .replacingOccurrences(of: ".", with: "")
+        .replacingOccurrences(of: ":", with: "")
+        .replacingOccurrences(of: "-", with: "")
+    
+    let pattern = "[0-9]{2,10}"
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return nil }
+    let nsStr = clean as NSString
+    let matches = regex.matches(in: clean, options: [], range: NSRange(location: 0, length: nsStr.length))
+    
+    for match in matches {
+        let candidate = nsStr.substring(with: match.range)
+        if isValidCUI(cui: candidate) {
+            return candidate
+        }
+    }
+    return nil
+}
+
+func parseFormattedAmount(_ text: String) -> Double? {
+    var cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    cleaned = cleaned.replacingOccurrences(of: " ", with: "")
+    
+    let separators: [Character] = [".", ","]
+    var lastSepIdx: String.Index? = nil
+    for idx in cleaned.indices.reversed() {
+        if separators.contains(cleaned[idx]) {
+            lastSepIdx = idx
+            break
+        }
+    }
+    
+    if let sepIdx = lastSepIdx {
+        let afterSep = cleaned[sepIdx...]
+        let digitsAfter = afterSep.dropFirst().filter { $0.isNumber }
+        let charsAfterCount = afterSep.count - 1
+        
+        if charsAfterCount == 1 || charsAfterCount == 2 {
+            let integerPart = String(cleaned[..<sepIdx]).filter { $0.isNumber }
+            let decimalPart = String(digitsAfter)
+            if let doubleVal = Double("\(integerPart).\(decimalPart)") {
+                return doubleVal
+            }
+        } else {
+            let allDigits = cleaned.filter { $0.isNumber }
+            return Double(allDigits)
+        }
+    } else {
+        let allDigits = cleaned.filter { $0.isNumber }
+        return Double(allDigits)
+    }
+    return nil
 }

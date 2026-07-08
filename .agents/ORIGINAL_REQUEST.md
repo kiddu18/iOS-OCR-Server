@@ -59,3 +59,32 @@ For each isolated receipt cluster, the system must accurately extract the Total,
 - [ ] The algorithm must successfully cluster the mock boxes into exactly 6 distinct groups.
 - [ ] The algorithm must extract non-zero, correct Total and VAT amounts for each of the 6 clusters based on the mock data.
 
+## Follow-up — 2026-07-07T21:26:41Z
+
+Fix the Swift Vapor OCR extraction server that currently fails to correctly cluster receipts in a 2D grid and accurately extract CUIs, totals, and VAT amounts. In the latest run, totals were extracted extremely low (e.g. 4.84, 10.39 instead of 188.75, 188.16) because the clustering algorithm broke.
+
+Working directory: e:\OCR Iphone\OcrServer
+Integrity mode: development
+
+## Requirements
+
+### R1. Correctly Cluster 2D Receipts
+The system must correctly group text boxes belonging to the same receipt when multiple receipts appear in a single image (e.g., a 2x3 grid), regardless of the image's rotation. Ensure the clustering fix doesn't inadvertently break the bounding box assignment for totals and VAT.
+
+### R2. Extract Valid CUIs
+The CUI extractor must strictly enforce the official Romanian Modulo-11 checksum to prevent false positives (like extracting totals or phone numbers as CUIs) and correctly verify them using the existing ANAF integration.
+
+### R3. Extract Accurate Totals and VAT
+The system must accurately identify the Total amount and the corresponding VAT (TVA), handling cases where the OCR might read the text slightly off or when the values are not perfectly aligned horizontally.
+
+## Verification Resources
+- Python mock scripts (`scratch/test_final.py` or similar) are available in the workspace to validate logic against the dataset. Ensure Python and Swift logic remain synchronized.
+- You have the ability to run Swift/Vapor from the command line (e.g., via Docker or WSL) to compile and test the code directly.
+
+## Acceptance Criteria
+
+### Extraction Accuracy
+- [ ] Processing the provided test image with 6 receipts successfully identifies exactly 6 distinct receipts.
+- [ ] No invalid CUIs (e.g., `42553` or `14626`) are extracted.
+- [ ] Totals match the visual receipts (e.g., MOL=188.16, Magistral=188.75).
+- [ ] VAT amounts are correctly identified even if the word "TVA" and the numerical value are not perfectly adjacent in the OCR output.

@@ -1,30 +1,31 @@
-# BRIEFING — 2026-07-03T12:05:00Z
+# BRIEFING — 2026-07-08T04:47:10Z
 
 ## Mission
-Manage the Project Orchestrator to fix the OCR bounding box clustering logic in VaporServer.swift to correctly identify and separate multiple receipts.
+Fix Vapor OCR extraction server to correctly cluster 2D receipts, extract valid CUIs using Romanian Modulo-11 checksum, and accurately extract Totals/VAT.
 
 ## 🔒 My Identity
 - Archetype: sentinel
 - Working directory: e:\OCR Iphone\.agents\sentinel
-- Orchestrator: 6ec1c23c-7100-48d1-bcb4-cda31ecf28b5
-- Victory Auditor: de2a0b32-7e12-4e18-a652-a046853d32db
+- Orchestrator: dc8685c6-e356-46f7-9d8f-28d428ae2035
+- Victory Auditor: TBD
 
 ## 🔒 Key Constraints
 - No technical decisions — relay only
 - Victory Audit is MANDATORY before reporting completion
+- Integrity mode: development
 
 ## User Context
-- **Last user request**: Fix the OCR bounding box clustering logic in VaporServer.swift to correctly identify and separate multiple receipts from a single image.
+- **Last user request**: Fix Swift Vapor OCR extraction server (receipt clustering in 2D grid, correct Romanian Modulo-11 CUI validation, accurate total and VAT extraction).
 - **Pending clarifications**: none
-- **Delivered results**: Verified fix in VaporServer.swift separating OCR boxes into exactly 6 clusters, robust to typos, and correctly extracting financial amounts (Total, VAT, and Base).
+- **Delivered results**: none
 
 ## Project Status
-- **Phase**: complete
+- **Phase**: in progress
 
 ## Victory Audit Status
-- **Triggered**: yes
-- **Verdict**: VICTORY CONFIRMED
-- **Retry count**: 1
+- **Triggered**: no
+- **Verdict**: pending
+- **Retry count**: 0
 
 ## Artifact Index
 - e:\OCR Iphone\.agents\ORIGINAL_REQUEST.md — Verbatim record of the current user request.

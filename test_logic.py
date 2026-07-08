@@ -1,5 +1,6 @@
 import re
 import functools
+import math
 
 def is_valid_cui(cui):
     if not (2 <= len(cui) <= 10) or not cui.isdigit():
@@ -49,7 +50,33 @@ def is_buyer_cui_box(box, boxes, median_height):
             return True
     return False
 
+def is_phone_or_phone_label(box, boxes, median_height):
+    text = box["text"].upper()
+    phone_labels = ["TEL", "FAX", "MOBIL", "TELEFON"]
+    for label in phone_labels:
+        if label in text:
+            return True
+            
+    digits = "".join([c for c in text if c.isdigit()])
+    if len(digits) == 10 and (digits.startswith("07") or digits.startswith("02") or digits.startswith("03")):
+        return True
+        
+    for other in boxes:
+        if other["x"] == box["x"] and other["y"] == box["y"]:
+            continue
+        other_text = other["text"].upper()
+        has_phone_label = any(label in other_text for label in phone_labels)
+        if not has_phone_label:
+            continue
+        dy = abs(box["y"] - other["y"])
+        dx = abs(box["x"] - other["x"])
+        if dy < median_height * 1.5 and dx < median_height * 12.0:
+            return True
+    return False
+
 def is_seller_cui_box(box, boxes, median_height):
+    if is_phone_or_phone_label(box, boxes, median_height):
+        return None
     cui = extract_cui(box["text"])
     if not cui:
         return None
@@ -241,7 +268,8 @@ def group_boxes_into_lines(boxes, median_height):
     current_line = [sorted_by_y[0]]
     y_tolerance = median_height * 0.4
     for box in sorted_by_y[1:]:
-        if abs(box["y"] - current_line[0]["y"]) < y_tolerance:
+        avg_y = sum(b["y"] for b in current_line) / len(current_line)
+        if abs(box["y"] - avg_y) < y_tolerance:
             current_line.append(box)
         else:
             lines.append(current_line)
@@ -293,7 +321,7 @@ def extract_financials(boxes):
             break
             
     if not total_found:
-        total_pattern = r"(?:TOTAL|SUMA|ACHITAT|REST)\\s*(?:LEI)?\\s*[:=]*\\s*([0-9]+[.,][0-9]{2})"
+        total_pattern = r"(?:TOTAL|SUMA|ACHITAT)[ \t]*(?:LEI)?[ \t]*[:=]*[ \t]*([0-9]+[.,][0-9]{2})"
         match = re.search(total_pattern, full_text)
         if match:
             total_amount = float(match.group(1).replace(",", "."))

@@ -22,6 +22,9 @@ def is_fuzzy_match(s1: str, s2: str, tolerance: int = 1) -> bool:
 def is_valid_cui(cui):
     if not (2 <= len(cui) <= 10) or not cui.isdigit():
         return False
+    # Ignore 10-digit numbers starting with "07", "02", or "03" (phone numbers)
+    if len(cui) == 10 and (cui.startswith("07") or cui.startswith("02") or cui.startswith("03")):
+        return False
     control_key = "753217532"[::-1]
     cui_rev = cui[::-1]
     control_digit = int(cui_rev[0])
@@ -145,6 +148,19 @@ def extract_cui_with_fallback(boxes, candidate_boxes, text_blocks):
             continue
         if end < len(full_text) - 1 and full_text[end:end+2] == " %":
             continue
+        # Check if this candidate is a buyer CUI
+        is_buyer = False
+        for box in boxes:
+            bx, by, bw, bh, btext, _ = get_box_properties(box)
+            if cui_candidate in btext.replace(" ", ""):
+                sorted_heights = sorted([get_box_properties(b)[3] for b in boxes])
+                med_h = sorted_heights[len(sorted_heights) // 2] if sorted_heights else 15.0
+                if is_buyer_cui_box(box, boxes, med_h):
+                    is_buyer = True
+                    break
+        if is_buyer:
+            continue
+            
         if is_valid_cui(cui_candidate):
             return cui_candidate, False
             
@@ -182,7 +198,33 @@ def extract_cui_with_fallback(boxes, candidate_boxes, text_blocks):
         
     return None, True
 
+def is_phone_or_phone_label(box, boxes, median_height):
+    text = box["text"].upper()
+    phone_labels = ["TEL", "FAX", "MOBIL", "TELEFON"]
+    for label in phone_labels:
+        if label in text:
+            return True
+            
+    digits = "".join([c for c in text if c.isdigit()])
+    if len(digits) == 10 and (digits.startswith("07") or digits.startswith("02") or digits.startswith("03")):
+        return True
+        
+    for other in boxes:
+        if other["x"] == box["x"] and other["y"] == box["y"]:
+            continue
+        other_text = other["text"].upper()
+        has_phone_label = any(label in other_text for label in phone_labels)
+        if not has_phone_label:
+            continue
+        dy = abs(box["y"] - other["y"])
+        dx = abs(box["x"] - other["x"])
+        if dy < median_height * 1.5 and dx < median_height * 12.0:
+            return True
+    return False
+
 def is_seller_anchor_box(box, boxes, median_height):
+    if is_phone_or_phone_label(box, boxes, median_height):
+        return False
     if is_buyer_cui_box(box, boxes, median_height):
         return False
         
@@ -318,7 +360,8 @@ def group_boxes_into_lines(boxes, median_height):
     current_line = [sorted_by_y[0]]
     y_tolerance = median_height * 0.4
     for box in sorted_by_y[1:]:
-        if abs(box["y"] - current_line[0]["y"]) < y_tolerance:
+        avg_y = sum(b["y"] for b in current_line) / len(current_line)
+        if abs(box["y"] - avg_y) < y_tolerance:
             current_line.append(box)
         else:
             lines.append(current_line)
@@ -384,7 +427,7 @@ def extract_financials(boxes):
             break
             
     if not total_found:
-        total_pattern = r"(?:TOTAL|SUMA|ACHITAT|REST)\s*(?:LEI)?\s*[:=]*\s*([0-9]+[.,][0-9]{2})"
+        total_pattern = r"(?:TOTAL|SUMA|ACHITAT)[ \t]*(?:LEI)?[ \t]*[:=]*[ \t]*([0-9]+[.,][0-9]{2})"
         match = re.search(total_pattern, full_text)
         if match:
             total_amount = float(match.group(1).replace(",", "."))
