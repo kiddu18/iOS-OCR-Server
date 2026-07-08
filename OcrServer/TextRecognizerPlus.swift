@@ -34,6 +34,7 @@ final class TextRecognizerPlus {
         var bestScore = -1.0
         var bestOrientation: CGImagePropertyOrientation = .up
 
+        print("[ROTATION] Probing orientations...")
         for orientation in [CGImagePropertyOrientation.up, .right, .down, .left] {
             let rotated = rotate(cg, orientation: orientation)
             var probe = RecognizeTextRequest()
@@ -41,13 +42,10 @@ final class TextRecognizerPlus {
             probe.usesLanguageCorrection = false
             let obs = (try? await probe.perform(on: rotated)) ?? []
 
-            // Scor = nr. de caractere recunoscute, ponderat cu confidence,
-            // dar socotim DOAR textul care este orizontal in orientarea respectiva.
-            // Vision corecteaza rotatia intern si citeste text vertical, dar box-urile
-            // raman cu h > w, ceea ce blocheaza segmentarea.
             let W = Double(rotated.width)
             let H = Double(rotated.height)
             var score = 0.0
+            var horizCount = 0
             for o in obs {
                 if let c = o.topCandidates(1).first {
                     let rect = o.boundingBox
@@ -55,14 +53,34 @@ final class TextRecognizerPlus {
                     let pixelH = rect.height * H
                     if pixelW > pixelH * 1.2 {
                         score += Double(c.string.count) * Double(c.confidence)
+                        horizCount += 1
                     }
                 }
             }
+            let name: String
+            switch orientation {
+            case .up: name = "up"
+            case .right: name = "right"
+            case .down: name = "down"
+            case .left: name = "left"
+            default: name = "unknown"
+            }
+            print("  Orientation \(name): score=\(score), horizontalLines=\(horizCount), totalLines=\(obs.count)")
+            
             if score > bestScore {
                 bestScore = score
                 bestOrientation = orientation
             }
         }
+        let bestName: String
+        switch bestOrientation {
+        case .up: bestName = "up"
+        case .right: bestName = "right"
+        case .down: bestName = "down"
+        case .left: bestName = "left"
+        default: bestName = "unknown"
+        }
+        print("[ROTATION] Best orientation selected: \(bestName)")
         return rotate(cg, orientation: bestOrientation)
     }
 

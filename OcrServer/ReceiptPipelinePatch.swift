@@ -25,17 +25,34 @@ enum ReceiptSegmenter {
     /// Golurile interne ale unui bon (coloana etichete/sume) sunt întrerupte de rândurile late
     /// (antet, adresă), deci nu declanșează split. Golurile DINTRE bonuri sunt continue.
     static func segment(_ words: [OCRBoxItem]) -> [[OCRBoxItem]] {
+        print("[SEGMENTER] === START === words count: \(words.count)")
         let heights = words.map { $0.h }.sorted()
         let mh = heights.isEmpty ? 15.0 : heights[heights.count / 2]
+        print("[SEGMENTER] Median height (mh): \(mh)")
 
         var parts: [[OCRBoxItem]] = []
         xycut(words, minGapX: mh * 0.5, minGapY: mh * 0.8, into: &parts)
-        parts = parts.filter { $0.count >= 8 }
+        print("[SEGMENTER] Parts after xycut: \(parts.count)")
+        for (i, p) in parts.enumerated() {
+            print("  Part \(i): \(p.count) words, bbox: x=\(bbox(p).minX..<(bbox(p).minX + bbox(p).w)) y=\(bbox(p).minY..<(bbox(p).minY + bbox(p).h))")
+        }
 
-        var merged = mergeFragments(parts, medianHeight: mh)
-        merged = merged.flatMap { splitByHeaderAnchors($0) }
-        return merged.filter { $0.count >= 14 }
-                     .sorted { bbox($0).minX < bbox($1).minX || (abs(bbox($0).minX - bbox($1).minX) < 500 && bbox($0).minY < bbox($1).minY) }
+        let filteredParts = parts.filter { $0.count >= 8 }
+        print("[SEGMENTER] Parts after filtering count>=8: \(filteredParts.count)")
+
+        var merged = mergeFragments(filteredParts, medianHeight: mh)
+        print("[SEGMENTER] Parts after mergeFragments: \(merged.count)")
+        for (i, m) in merged.enumerated() {
+            print("  Merged \(i): \(m.count) words")
+        }
+
+        let split = merged.flatMap { splitByHeaderAnchors($0) }
+        print("[SEGMENTER] Parts after splitByHeaderAnchors: \(split.count)")
+
+        let finalSegments = split.filter { $0.count >= 14 }
+        print("[SEGMENTER] Final segments count>=14: \(finalSegments.count)")
+        
+        return finalSegments.sorted { bbox($0).minX < bbox($1).minX || (abs(bbox($0).minX - bbox($1).minX) < 500 && bbox($0).minY < bbox($1).minY) }
     }
 
     private static func xycut(_ ws: [OCRBoxItem], minGapX: Double, minGapY: Double, into out: inout [[OCRBoxItem]]) {

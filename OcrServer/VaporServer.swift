@@ -442,6 +442,18 @@ actor VaporServer {
                 
                 accountingData = accountingDataArray.first
                 fullText = allBoxesOut.map { $0.text }.joined(separator: " ")
+                
+                // === STOCARE PENTRU /debug_boxes ===
+                do {
+                    struct BoxDump: Codable {
+                        let text: String; let x: Double; let y: Double; let w: Double; let h: Double
+                    }
+                    let dumpBoxes = allBoxesOut.map { BoxDump(text: $0.text, x: $0.x, y: $0.y, w: $0.w, h: $0.h) }
+                    let encoder = JSONEncoder()
+                    encoder.outputFormatting = .prettyPrinted
+                    let jsonData = try encoder.encode(dumpBoxes)
+                    AccountingOrchestrator.shared.lastBoxesJson = jsonData
+                } catch {}
             }
             
             if accept.contains("application/json") {
