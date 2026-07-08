@@ -29,7 +29,7 @@ enum ReceiptSegmenter {
         let mh = heights.isEmpty ? 15.0 : heights[heights.count / 2]
 
         var parts: [[OCRBoxItem]] = []
-        xycut(words, minGapX: mh * 1.0, minGapY: mh * 1.5, into: &parts)
+        xycut(words, minGapX: mh * 0.5, minGapY: mh * 0.8, into: &parts)
         parts = parts.filter { $0.count >= 8 }
 
         var merged = mergeFragments(parts, medianHeight: mh)

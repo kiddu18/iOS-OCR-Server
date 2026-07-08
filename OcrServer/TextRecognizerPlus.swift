@@ -41,12 +41,21 @@ final class TextRecognizerPlus {
             probe.usesLanguageCorrection = false
             let obs = (try? await probe.perform(on: rotated)) ?? []
 
-            // Scor = nr. de caractere recunoscute, ponderat cu confidence.
-            // Textul rotit gresit produce putine observatii cu confidence mic.
+            // Scor = nr. de caractere recunoscute, ponderat cu confidence,
+            // dar socotim DOAR textul care este orizontal in orientarea respectiva.
+            // Vision corecteaza rotatia intern si citeste text vertical, dar box-urile
+            // raman cu h > w, ceea ce blocheaza segmentarea.
+            let W = Double(rotated.width)
+            let H = Double(rotated.height)
             var score = 0.0
             for o in obs {
                 if let c = o.topCandidates(1).first {
-                    score += Double(c.string.count) * Double(c.confidence)
+                    let rect = o.boundingBox
+                    let pixelW = rect.width * W
+                    let pixelH = rect.height * H
+                    if pixelW > pixelH * 1.2 {
+                        score += Double(c.string.count) * Double(c.confidence)
+                    }
                 }
             }
             if score > bestScore {
