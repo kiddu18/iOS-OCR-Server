@@ -34,7 +34,8 @@ enum ReceiptSegmenter {
         xycut(words, minGapX: mh * 0.5, minGapY: mh * 0.8, into: &parts)
         print("[SEGMENTER] Parts after xycut: \(parts.count)")
         for (i, p) in parts.enumerated() {
-            print("  Part \(i): \(p.count) words, bbox: x=\(bbox(p).minX..<(bbox(p).minX + bbox(p).w)) y=\(bbox(p).minY..<(bbox(p).minY + bbox(p).h))")
+            let box = bbox(p)
+            print("  Part \(i): \(p.count) words, bbox: x=\(box.minX..<(box.maxX)) y=\(box.minY..<(box.maxY))")
         }
 
         let filteredParts = parts.filter { $0.count >= 8 }
