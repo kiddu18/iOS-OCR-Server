@@ -210,7 +210,7 @@ async function processNext() {
         formData.append('buyer_cui', buyerCuiInput.value.trim());
     }
     
-    const processingMode = document.getElementById('processing-mode')?.value || 'auto';
+    const processingMode = document.getElementById('processing-mode')?.value || 'bon';
     formData.append('processing_mode', processingMode);
 
     const baseUrl = document.getElementById('server-ip').value.replace(/\/$/, "");

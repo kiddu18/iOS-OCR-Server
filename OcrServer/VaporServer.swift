@@ -424,11 +424,9 @@ actor VaporServer {
                     
                     let segText = cleanBoxes.map { $0.text }.joined(separator: " ")
                     
-                    var forcedType: String? = nil
+                    var forcedType = "Bon Fiscal"
                     if upload.processing_mode == "chitanta" {
                         forcedType = "Chitanță de mână"
-                    } else if upload.processing_mode == "bon" {
-                        forcedType = "Bon Fiscal"
                     }
                     
                     let results = await AccountingOrchestrator.shared.processOcrResult(

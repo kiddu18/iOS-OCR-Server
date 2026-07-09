@@ -86,52 +86,10 @@ final class TextRecognizerPlus {
 
     private func rotate(_ image: CGImage, orientation: CGImagePropertyOrientation) -> CGImage {
         guard orientation != .up else { return image }
-        
-        let width = image.width
-        let height = image.height
-        
-        var degree = 0.0
-        var newWidth = width
-        var newHeight = height
-        
-        switch orientation {
-        case .down:
-            degree = 180.0
-        case .right:
-            degree = 270.0
-            newWidth = height
-            newHeight = width
-        case .left:
-            degree = 90.0
-            newWidth = height
-            newHeight = width
-        default:
-            return image
-        }
-        
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let hasAlpha = image.alphaInfo != .none && image.alphaInfo != .noneSkipLast && image.alphaInfo != .noneSkipFirst
-        let alphaInfo = hasAlpha ? CGImageAlphaInfo.premultipliedLast.rawValue : CGImageAlphaInfo.noneSkipLast.rawValue
-        let bitmapInfo = alphaInfo | CGBitmapInfo.byteOrder32Big.rawValue
-        
-        guard let context = CGContext(
-            data: nil,
-            width: newWidth,
-            height: newHeight,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: colorSpace,
-            bitmapInfo: bitmapInfo
-        ) else {
-            print("[ROTATION] ERROR: Failed to create CGContext for rotation!")
-            return image
-        }
-        
-        context.translateBy(x: CGFloat(newWidth) / 2.0, y: CGFloat(newHeight) / 2.0)
-        context.rotate(by: CGFloat(degree * .pi / 180.0))
-        context.draw(image, in: CGRect(x: -CGFloat(width) / 2.0, y: -CGFloat(height) / 2.0, width: CGFloat(width), height: CGFloat(height)))
-        
-        return context.makeImage() ?? image
+        let ci = CIImage(cgImage: image).oriented(orientation)
+        let transform = CGAffineTransform(translationX: -ci.extent.origin.x, y: -ci.extent.origin.y)
+        let normalized = ci.transformed(by: transform)
+        return ciContext.createCGImage(normalized, from: CGRect(origin: .zero, size: normalized.extent.size)) ?? image
     }
 
     // MARK: - 2. OCR la nivel de cuvant
