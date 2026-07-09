@@ -1276,27 +1276,57 @@ public class AccountingOrchestrator {
     public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil, forcedDocumentType: String? = nil) async -> [AccountingResult] {
         // Generate textBlocks (grouped by lines) for legacy regex usage
         var textBlocks: [String] = []
-        let sortedByY = boxes.sorted { $0.y < $1.y }
-        if !sortedByY.isEmpty {
-            var lines: [[OCRBoxItem]] = []
-            var currentLine = [sortedByY[0]]
-            let sortedHeights = sortedByY.map { $0.h }.sorted()
-            let medianHeight = sortedHeights[sortedHeights.count / 2]
-            let yTolerance = medianHeight * 0.4
+        if !boxes.isEmpty {
+            // Detect if boxes are from a rotated image (median h >> median w)
+            let sortedWidths = boxes.map { $0.w }.sorted()
+            let sortedHeights = boxes.map { $0.h }.sorted()
+            let medianW = sortedWidths[sortedWidths.count / 2]
+            let medianH = sortedHeights[sortedHeights.count / 2]
+            let isRotated = medianH > medianW * 1.5
             
-            for box in sortedByY.dropFirst() {
-                if abs(box.y - currentLine[0].y) < yTolerance {
-                    currentLine.append(box)
-                } else {
-                    lines.append(currentLine)
-                    currentLine = [box]
+            if isRotated {
+                // ROTATED: lines run vertically. Group by X, sort within line by Y.
+                let sortedByX = boxes.sorted { $0.x < $1.x }
+                var lines: [[OCRBoxItem]] = []
+                var currentLine = [sortedByX[0]]
+                let xTolerance = medianW * 0.5
+                
+                for box in sortedByX.dropFirst() {
+                    if abs(box.x - currentLine[0].x) < xTolerance {
+                        currentLine.append(box)
+                    } else {
+                        lines.append(currentLine)
+                        currentLine = [box]
+                    }
                 }
-            }
-            lines.append(currentLine)
-            
-            textBlocks = lines.map { line -> String in
-                let sortedLine = line.sorted { $0.x < $1.x }
-                return sortedLine.map { $0.text }.joined(separator: " ")
+                lines.append(currentLine)
+                
+                textBlocks = lines.map { line -> String in
+                    let sortedLine = line.sorted { $0.y < $1.y }
+                    return sortedLine.map { $0.text }.joined(separator: " ")
+                }
+                print("[PROCESS] Rotated image detected (medianH=\(Int(medianH)) > medianW=\(Int(medianW))*1.5). Grouped \(lines.count) lines by X axis.")
+            } else {
+                // NORMAL: lines run horizontally. Group by Y, sort within line by X.
+                let sortedByY = boxes.sorted { $0.y < $1.y }
+                var lines: [[OCRBoxItem]] = []
+                var currentLine = [sortedByY[0]]
+                let yTolerance = medianH * 0.4
+                
+                for box in sortedByY.dropFirst() {
+                    if abs(box.y - currentLine[0].y) < yTolerance {
+                        currentLine.append(box)
+                    } else {
+                        lines.append(currentLine)
+                        currentLine = [box]
+                    }
+                }
+                lines.append(currentLine)
+                
+                textBlocks = lines.map { line -> String in
+                    let sortedLine = line.sorted { $0.x < $1.x }
+                    return sortedLine.map { $0.text }.joined(separator: " ")
+                }
             }
         }
         
