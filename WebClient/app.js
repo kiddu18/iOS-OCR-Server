@@ -85,7 +85,8 @@ function handleFiles(files) {
     processNext();
 }
 
-function suggestAccount(companyName, fileType) {
+function suggestAccount(companyName, fileType, serverSuggestion = '') {
+    if (serverSuggestion && serverSuggestion.trim()) return serverSuggestion;
     if (fileType === 'Chitanță de mână') return '5311';
     if (fileType === 'Chitanță POS') return '5125';
     const text = (companyName || '').toUpperCase();
@@ -147,7 +148,7 @@ function renderPipeline() {
                         ${item.status === 'done' ? '<i class="ph ph-check-circle"></i> VALIDAT' : (item.status === 'error' ? '<i class="ph ph-warning"></i> EROARE' : '<i class="ph ph-spinner ph-spin"></i> PROCESARE')}
                     </span>
                 </td>
-                <td><a href="#" onclick="showImageModal('${item.id}')" style="color:var(--primary);text-decoration:none;font-weight:500;">${item.file.name}</a></td>
+                <td><a href="#" onclick="viewImage('${item.id}')" style="color:var(--primary);text-decoration:none;font-weight:500;">${item.name || item.file.name}</a></td>
                 <td>${item.status === 'done' ? d.documentType || 'Necunoscut' : '-'}</td>
                 <td>${serieHtml}</td>
                 <td>${numarHtml}</td>
@@ -226,14 +227,14 @@ async function processNext() {
             // Daca avem un singur bon gasit, updatam randul curent
             if (data.accounting_data_array.length === 1) {
                 nextItem.data = data.accounting_data_array[0];
-                nextItem.data.suggestedAccount = suggestAccount(nextItem.data.companyName, nextItem.data.documentType);
+                nextItem.data.suggestedAccount = suggestAccount(nextItem.data.companyName, nextItem.data.documentType, nextItem.data.suggestedAccount);
                 nextItem.status = 'done';
             } else {
                 // Daca avem mai multe, stergem randul vechi si cream N randuri noi
                 pipeline = pipeline.filter(x => x.id !== nextItem.id);
                 data.accounting_data_array.forEach((accData, idx) => {
                     const newId = nextItem.id + "_" + idx;
-                    accData.suggestedAccount = suggestAccount(accData.companyName, accData.documentType);
+                    accData.suggestedAccount = suggestAccount(accData.companyName, accData.documentType, accData.suggestedAccount);
                     pipeline.push({
                         id: newId,
                         file: nextItem.file,
@@ -247,7 +248,7 @@ async function processNext() {
         } else if (data.success && data.accounting_data) {
             // Compatibilitate backward
             nextItem.data = data.accounting_data;
-            nextItem.data.suggestedAccount = suggestAccount(nextItem.data.companyName, nextItem.data.documentType);
+            nextItem.data.suggestedAccount = suggestAccount(nextItem.data.companyName, nextItem.data.documentType, nextItem.data.suggestedAccount);
             nextItem.status = 'done';
         } else {
             nextItem.status = 'error';

@@ -186,6 +186,7 @@ enum CUI {
     ///    → toate variantele se verifică ÎNTR-UN SINGUR batch ANAF, iar fuzzy match-ul
     ///    pe denumire alege candidatul corect.
     static func candidates(fromLines lines: [String], buyerCui: String?) -> (best: String?, verified: Bool, anafCandidates: [String]) {
+        let normalizedBuyerCui = buyerCui.map { repairOCRDigits($0).filter { $0.isNumber } }
         let buyerRegex = try! NSRegularExpression(pattern: "CLIENT|CUMPARATOR|BENEF|CNP")
         let ctxRegex = try! NSRegularExpression(
             pattern: "(?:COD\\s*FISCAL|COD\\s*IDENTIFICARE\\s*FISCALA|C\\.?\\s*[I1]\\.?\\s*F|CUI)\\s*[.:]?\\s*(?:R[O0Q])?\\s*[.:]?\\s*([A-Z0-9@]{4,10})|\\bR[O0]\\s?([0-9OQDILSZB@]{4,10})\\b",
@@ -206,7 +207,7 @@ enum CUI {
         // 1) match direct pe checksum
         for c in raw {
             let d = repairOCRDigits(c).filter { $0.isNumber }
-            if isValid(d), d != buyerCui { return (d, true, [d]) }
+            if isValid(d), d != normalizedBuyerCui { return (d, true, [d]) }
         }
         // 2) reparare ghidată de checksum → candidați pentru batch-ul ANAF
         var anafCandidates: [String] = []
@@ -224,7 +225,7 @@ enum CUI {
             }
         }
         var seen = Set<String>()
-        anafCandidates = anafCandidates.filter { $0 != buyerCui && seen.insert($0).inserted }
+        anafCandidates = anafCandidates.filter { $0 != normalizedBuyerCui && seen.insert($0).inserted }
         return (anafCandidates.first, false, anafCandidates)
     }
 }

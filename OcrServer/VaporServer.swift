@@ -442,28 +442,52 @@ actor VaporServer {
                 
                 // --- 5. UN SINGUR batch ANAF v9 pentru toate CUI-urile din poza
                 //        (limita ANAF: 1 request/secunda -> nu apela per bon!)
-                let cuis = accountingDataArray.compactMap { $0.cui }.filter { CUI.isValid($0) }
+                var cuiSet = Set<String>()
+                for result in accountingDataArray {
+                    if let cui = result.cui, CUI.isValid(cui) {
+                        cuiSet.insert(String(Int(cui) ?? 0))
+                    }
+                    for candidate in result.anafCandidates ?? [] where CUI.isValid(candidate) {
+                        cuiSet.insert(String(Int(candidate) ?? 0))
+                    }
+                }
+                let cuis = Array(cuiSet)
                 let anafInfo = await ANAF.verifyBatch(cuis: cuis)
                 
                 for i in accountingDataArray.indices {
-                    guard let cui = accountingDataArray[i].cui else { continue }
-                    let cleanCui = String(Int(cui) ?? 0)
-                    guard let info = anafInfo[cleanCui] else { continue }
+                    var candidates = accountingDataArray[i].anafCandidates ?? []
+                    if let cui = accountingDataArray[i].cui {
+                        candidates.insert(cui, at: 0)
+                    }
+                    candidates = Array(Set(candidates.map { String(Int($0) ?? 0) }.filter { CUI.isValid($0) }))
+                    guard !candidates.isEmpty else { continue }
+
+                    var selected: (cui: String, info: ANAFCompany, score: Double)? = nil
+                    let ocrText = i < segmentTexts.count ? segmentTexts[i] : ""
+                    for candidate in candidates {
+                        guard let info = anafInfo[candidate] else { continue }
+                        let score = info.denumire.map { ANAF.nameMatchScore(anafName: $0, ocrHeader: ocrText) } ?? 0
+                        if selected == nil || score > selected!.score {
+                            selected = (candidate, info, score)
+                        }
+                    }
+                    guard let selected else { continue }
+                    let info = selected.info
                     
+                    accountingDataArray[i].cui              = selected.cui
                     accountingDataArray[i].companyName      = info.denumire
                     accountingDataArray[i].companyAddress   = info.adresa
                     accountingDataArray[i].companyIsVatPayer = info.scpTVA
                     
                     // === DUBLA VALIDARE (ANAF + Similaritate Antet OCR) ===
-                    if let officialName = info.denumire, i < segmentTexts.count {
-                        let ocrText = segmentTexts[i]
-                        let score = ANAF.nameMatchScore(anafName: officialName, ocrHeader: ocrText)
-                        print("[VALIDATION] CUI \(cui) for company '\(officialName)': Fuzzy match score: \(score)")
+                    if let officialName = info.denumire {
+                        let score = selected.score
+                        print("[VALIDATION] CUI \(selected.cui) for company '\(officialName)': Fuzzy match score: \(score)")
                         if score >= 0.35 {
                             accountingDataArray[i].cuiRequiresVerification = false // Confirmat 100%
                         } else {
                             accountingDataArray[i].cuiRequiresVerification = true // Necesita verificare manuala
-                            accountingDataArray[i].fiscalWarnings.append("⚠️ Nume necorelat: Firma înregistrată la CUI-ul \(cui) (\(officialName)) nu a fost confirmată în antetul bonului (scor: \(Int(score * 100))%).")
+                            accountingDataArray[i].fiscalWarnings.append("Nume necorelat: firma inregistrata la CUI-ul \(selected.cui) (\(officialName)) nu a fost confirmata in antetul bonului (scor: \(Int(score * 100))%).")
                         }
                     } else {
                         accountingDataArray[i].cuiRequiresVerification = false
@@ -733,21 +757,36 @@ class DocumentClassificationAgent: AccountingAgent {
 
 class DocumentDetailsAgent: AccountingAgent {
     func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
-        // Find Company Name
+        let usefulLines = textBlocks
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        // Find Company Name from a whole OCR line. Word-level OCR boxes often contain only "SRL".
+        let companyNoise = try? NSRegularExpression(
+            pattern: "\\b(CIF|CUI|COD|FISCAL|BON|NUMAR|DATA|TOTAL|TVA|CLIENT|CUMPARATOR|CASA|AMEF)\\b",
+            options: [.caseInsensitive]
+        )
         var companyName: String? = nil
-        for box in boxes {
-            let t = box.text.uppercased()
-            if t.contains("SRL") || t.contains("S.R.L") || t.contains("SA") || t.contains("S.A.") || t.contains("SNC") {
-                companyName = box.text
+        for line in usefulLines.prefix(12) {
+            let upper = line.uppercased()
+            let hasCompanySuffix = upper.range(of: "\\b(S\\.?R\\.?L\\.?|S\\.?A\\.?|SNC|PFA|II|IF)\\b", options: .regularExpression) != nil
+            let hasNoise = companyNoise?.firstMatch(in: upper, range: NSRange(upper.startIndex..., in: upper)) != nil
+            if hasCompanySuffix && !hasNoise {
+                companyName = line
+                    .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 break
             }
         }
-        if companyName == nil, let firstBox = boxes.first(where: { $0.text.trimmingCharacters(in: .whitespacesAndNewlines).count > 3 }) {
-            companyName = firstBox.text
+        if companyName == nil {
+            companyName = usefulLines.prefix(6).first(where: { line in
+                let cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                return cleaned.count > 3 && cleaned.filter { $0.isNumber }.count < cleaned.count / 2
+            })
         }
         result.companyName = companyName
         
-        let fullText = boxes.map { $0.text }.joined(separator: " \n ").uppercased()
+        let fullText = usefulLines.joined(separator: "\n").uppercased()
         
         let seriesPattern = "(?:SERIA|SERIE|SERIA:|CHITANTA\\s*SERIA)\\s*([A-Z]{1,5})"
         if let regex = try? NSRegularExpression(pattern: seriesPattern, options: []) {
@@ -758,7 +797,7 @@ class DocumentDetailsAgent: AccountingAgent {
             }
         }
         
-        let numberPattern = "(?:NR\\.?|NUMAR|BON\\s*NR\\.?|FACTURA\\s*NR\\.?|CHITANTA\\s*NR\\.?|BF\\.?)\\s*[:]*\\s*([0-9]{1,10})"
+        let numberPattern = "(?:NR\\.?|NUMAR(?:\\s+BON(?:\\s+FISCAL)?)?|BON\\s*NR\\.?|FACTURA\\s*NR\\.?|CHITANTA\\s*NR\\.?|BF\\.?)\\s*[:#\\-]*\\s*([0-9]{1,10})"
         if let regex = try? NSRegularExpression(pattern: numberPattern, options: []) {
             let nsString = fullText as NSString
             let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
@@ -767,14 +806,35 @@ class DocumentDetailsAgent: AccountingAgent {
             }
         }
         
-        let datePattern = "(?:DATA\\s*[:]*\\s*)?([0-3][0-9][\\.\\-\\/][0-1][0-9][\\.\\-\\/]20[0-9]{2})"
+        let datePattern = "(?:DATA\\s*[:]*\\s*)?([0-9OQISB]{2}[\\.\\-\\/][0-9OQISB]{2}[\\.\\-\\/]20[0-9OQISB]{2})"
         if let regex = try? NSRegularExpression(pattern: datePattern, options: []) {
             let nsString = fullText as NSString
             let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: nsString.length))
             if let m = match, m.numberOfRanges > 1 {
-                result.documentDate = nsString.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                result.documentDate = normalizeDate(nsString.substring(with: m.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines))
             }
         }
+    }
+
+    private func normalizeDate(_ raw: String) -> String {
+        let repaired = CUI.repairOCRDigits(raw)
+        let separator = repaired.first(where: { ".-/".contains($0) }) ?? "."
+        let parts = repaired.split(whereSeparator: { ".-/".contains($0) }).map(String.init)
+        guard parts.count == 3,
+              var day = Int(parts[0]),
+              var month = Int(parts[1]),
+              var year = Int(parts[2]) else {
+            return repaired
+        }
+        if day > 31, let first = parts[0].first, first == "8" || first == "6" || first == "9" {
+            day = Int("0" + String(parts[0].dropFirst())) ?? day
+        }
+        if month > 12, let first = parts[1].first, first == "8" || first == "6" || first == "9" {
+            month = Int("0" + String(parts[1].dropFirst())) ?? month
+        }
+        if year < 2000 { year += 2000 }
+        let sep = String(separator)
+        return "\(String(format: "%02d", day))\(sep)\(String(format: "%02d", month))\(sep)\(String(format: "%04d", year))"
     }
 }
 
@@ -786,9 +846,9 @@ class CuiExtractorAgent: AccountingAgent {
     }
     
     func process(textBlocks: [String], boxes: [OCRBoxItem], result: inout AccountingResult) async {
-        let (best, verified, candidates) = CUI.candidates(fromLines: textBlocks, buyerCui: buyerCui)
+        let (best, _, candidates) = CUI.candidates(fromLines: textBlocks, buyerCui: buyerCui)
         result.cui = best
-        result.cuiRequiresVerification = !verified
+        result.cuiRequiresVerification = true
         result.anafCandidates = candidates
     }
 }
@@ -806,12 +866,28 @@ class FinancialAmountsAgent: AccountingAgent {
             allAmounts.append(contentsOf: FinancialExtraction.amounts(in: line))
         }
         
-        // --- SPATIAL TOTAL EXTRACTION ---
-        let totalKeywords = ["TOTAL", "SUMA", "ACHITAT"]
+        // --- TOTAL EXTRACTION ---
+        let totalKeywords = ["TOTAL", "T0TAL", "TIAL", "TlAL", "SUMA", "ACHITAT", "PLATA"]
         var totalFound = false
         var totalAmount: Double? = nil
+        let nonTotalKeywords = ["SUBTOTAL", "TOTAL TVA", "TVA TOTAL", "TOTAL TAXA", "TOTAL TAXE", "REST"]
+
+        for line in textBlocks.reversed() {
+            let upper = line.uppercased()
+            if nonTotalKeywords.contains(where: { upper.contains($0) }) { continue }
+            guard totalKeywords.contains(where: { upper.contains($0) }) else { continue }
+            let amounts = FinancialExtraction.amounts(in: line).filter { val in
+                val > 1.0 && ![21.0, 19.0, 11.0, 9.0, 5.0].contains(val)
+            }
+            if let val = amounts.last {
+                totalAmount = val
+                totalFound = true
+                break
+            }
+        }
         
         for box in boxes {
+            if totalFound { break }
             let cleanText = box.text.uppercased().replacingOccurrences(of: " ", with: "").replacingOccurrences(of: ":", with: "")
             if cleanText.contains("SUBTOTAL") {
                 continue
@@ -857,7 +933,7 @@ class FinancialAmountsAgent: AccountingAgent {
         
         // Fallback TOTAL
         if !totalFound {
-            let totalPattern = "(?i)(?:TOTAL|SUMA|ACHITAT|REST)\\s*(?:LEI)?\\s*[:=]*\\s*([0-9]+[.,][0-9]{2})"
+            let totalPattern = "(?i)(?:TOTAL|T0TAL|SUMA|ACHITAT)(?:\\s+DE)?(?:\\s+PLATA)?\\s*(?:LEI)?\\s*[:=]*\\s*([0-9]+[.,][0-9]{2})"
             if let regex = try? NSRegularExpression(pattern: totalPattern, options: []),
                let match = regex.firstMatch(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
                 let matchedString = (fullText as NSString).substring(with: match.range(at: 1))
@@ -912,14 +988,16 @@ class FinancialAmountsAgent: AccountingAgent {
             }
             
             var breakdowns: [VatBreakdown] = []
+            let hasMultipleRates = rates.count > 1
             
             // 3. PURE MATHEMATICAL MATCHING (Rotation & Spatial Invariant)
             for rate in rates {
                 if rate == 0.0 { continue }
                 var vatAmount: Double? = nil
+                var baseAmount: Double? = nil
                 
                 // Match Method A: Daca avem Totalul, testam daca vreun numar este TVA-ul (vat = total * rate / (100 + rate))
-                if let total = totalAmount {
+                if !hasMultipleRates, let total = totalAmount {
                     let expectedVat = (total * rate) / (100.0 + rate)
                     for val in allAmounts {
                         if abs(val - expectedVat) <= 0.06 {
@@ -935,6 +1013,7 @@ class FinancialAmountsAgent: AccountingAgent {
                         for vatCand in allAmounts {
                             if baseCand == vatCand { continue }
                             if abs(vatCand - baseCand * (rate / 100.0)) <= 0.05 {
+                                baseAmount = baseCand
                                 vatAmount = vatCand
                                 break
                             }
@@ -943,8 +1022,20 @@ class FinancialAmountsAgent: AccountingAgent {
                     }
                 }
                 
+                if let base = baseAmount, let vat = vatAmount {
+                    let pctString = "\(Int(rate))%"
+                    if !breakdowns.contains(where: { $0.percentage == pctString }) {
+                        breakdowns.append(VatBreakdown(
+                            percentage: pctString,
+                            vatAmount: (vat * 100).rounded() / 100,
+                            baseAmount: (base * 100).rounded() / 100
+                        ))
+                    }
+                    continue
+                }
+
                 // Reconcile and calculate base
-                let (recTotal, recVat, verified, warning) = FinancialExtraction.reconcile(
+                let (recTotal, recVat, _, warning) = FinancialExtraction.reconcile(
                     total: totalAmount,
                     vat: vatAmount,
                     rate: rate,
@@ -967,7 +1058,7 @@ class FinancialAmountsAgent: AccountingAgent {
             if breakdowns.isEmpty {
                 if let t = totalAmount {
                     let rate = validRates.first ?? 21.0
-                    let (recTotal, recVat, verified, warning) = FinancialExtraction.reconcile(
+                    let (recTotal, recVat, _, warning) = FinancialExtraction.reconcile(
                         total: t,
                         vat: nil,
                         rate: rate,
