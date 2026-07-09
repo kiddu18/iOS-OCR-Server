@@ -294,6 +294,7 @@ actor VaporServer {
             struct Upload: Content { 
                 var file: File 
                 var buyer_cui: String?
+                var processing_mode: String?
             }
 
             let upload: Upload
@@ -415,15 +416,29 @@ actor VaporServer {
                 print("Segmente (bonuri) detectate: \(segments.count)")
                 
                 // --- 4. Per bon: crop + contrast + re-OCR curat -> extractia existenta
+                var segmentTexts: [String] = []
                 for (i, seg) in segments.enumerated() {
                     let cleanBoxes = await plus.cropAndReOCR(image: image, clusterBoxes: seg)
                     allBoxesOut.append(contentsOf: cleanBoxes)
                     print("Bon \(i): \(seg.count) cuvinte -> \(cleanBoxes.count) dupa re-OCR")
                     
+                    let segText = cleanBoxes.map { $0.text }.joined(separator: " ")
+                    
+                    var forcedType: String? = nil
+                    if upload.processing_mode == "chitanta" {
+                        forcedType = "Chitanță de mână"
+                    } else if upload.processing_mode == "bon" {
+                        forcedType = "Bon Fiscal"
+                    }
+                    
                     let results = await AccountingOrchestrator.shared.processOcrResult(
                         boxes: cleanBoxes,
-                        buyerCui: upload.buyer_cui
+                        buyerCui: upload.buyer_cui,
+                        forcedDocumentType: forcedType
                     )
+                    for _ in results {
+                        segmentTexts.append(segText)
+                    }
                     accountingDataArray.append(contentsOf: results)
                 }
                 
@@ -433,11 +448,28 @@ actor VaporServer {
                 let anafInfo = await ANAF.verifyBatch(cuis: cuis)
                 
                 for i in accountingDataArray.indices {
-                    guard let cui = accountingDataArray[i].cui, let info = anafInfo[cui] else { continue }
+                    guard let cui = accountingDataArray[i].cui else { continue }
+                    let cleanCui = String(Int(cui) ?? 0)
+                    guard let info = anafInfo[cleanCui] else { continue }
+                    
                     accountingDataArray[i].companyName      = info.denumire
                     accountingDataArray[i].companyAddress   = info.adresa
                     accountingDataArray[i].companyIsVatPayer = info.scpTVA
-                    accountingDataArray[i].cuiRequiresVerification = false   // confirmat de ANAF
+                    
+                    // === DUBLA VALIDARE (ANAF + Similaritate Antet OCR) ===
+                    if let officialName = info.denumire, i < segmentTexts.count {
+                        let ocrText = segmentTexts[i]
+                        let score = ANAF.nameMatchScore(anafName: officialName, ocrHeader: ocrText)
+                        print("[VALIDATION] CUI \(cui) for company '\(officialName)': Fuzzy match score: \(score)")
+                        if score >= 0.35 {
+                            accountingDataArray[i].cuiRequiresVerification = false // Confirmat 100%
+                        } else {
+                            accountingDataArray[i].cuiRequiresVerification = true // Necesita verificare manuala
+                            accountingDataArray[i].fiscalWarnings.append("⚠️ Nume necorelat: Firma înregistrată la CUI-ul \(cui) (\(officialName)) nu a fost confirmată în antetul bonului (scor: \(Int(score * 100))%).")
+                        }
+                    } else {
+                        accountingDataArray[i].cuiRequiresVerification = false
+                    }
                 }
                 
                 accountingData = accountingDataArray.first
@@ -1146,7 +1178,7 @@ public class AccountingOrchestrator {
     // Stocam ultimele box-uri procesate pentru endpoint-ul /debug_boxes
     public var lastBoxesJson: Data?
     
-    public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil) async -> [AccountingResult] {
+    public func processOcrResult(boxes: [OCRBoxItem], buyerCui: String? = nil, forcedDocumentType: String? = nil) async -> [AccountingResult] {
         // Generate textBlocks (grouped by lines) for legacy regex usage
         var textBlocks: [String] = []
         let sortedByY = boxes.sorted { $0.y < $1.y }
@@ -1186,6 +1218,18 @@ public class AccountingOrchestrator {
         
         for agent in agents {
             await agent.process(textBlocks: textBlocks, boxes: boxes, result: &result)
+        }
+        
+        if let forced = forcedDocumentType {
+            result.documentType = forced
+            result.documentTypeRequiresVerification = false
+            if forced == "Chitanță de mână" || forced == "Chitanță POS" {
+                result.vatAmount = 0
+                result.vatPercentages = "-"
+                result.baseAmount = result.totalAmount
+                result.vatRequiresVerification = false
+                result.vatBreakdowns = nil
+            }
         }
         
         // --- SPLIT LOGIC ---

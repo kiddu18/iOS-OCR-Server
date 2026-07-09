@@ -31,7 +31,7 @@ enum ReceiptSegmenter {
         print("[SEGMENTER] Median height (mh): \(mh)")
 
         var parts: [[OCRBoxItem]] = []
-        xycut(words, minGapX: mh * 0.5, minGapY: mh * 0.8, into: &parts)
+        xycut(words, minGapX: mh * 1.0, minGapY: mh * 1.5, into: &parts)
         print("[SEGMENTER] Parts after xycut: \(parts.count)")
         for (i, p) in parts.enumerated() {
             let box = bbox(p)
@@ -263,11 +263,12 @@ enum ANAF {
         var out: [String: ANAFCompany] = [:]
         for f in found {
             let dg = f["date_generale"] as? [String: Any] ?? [:]
-            // atenție v9: "cui" vine ca număr, nu string
-            let cui = (dg["cui"] as? Int).map(String.init) ?? (dg["cui"] as? String) ?? ""
+            let cuiInt = (dg["cui"] as? Int) ?? (dg["cui"] as? String).flatMap(Int.init) ?? 0
+            let cuiStr = String(cuiInt)
+            guard cuiInt > 0 else { continue }
             let tva = (f["inregistrare_scop_Tva"] as? [String: Any])?["scpTVA"] as? Bool
-            out[cui] = ANAFCompany(cui: cui, denumire: dg["denumire"] as? String,
-                                   adresa: dg["adresa"] as? String, scpTVA: tva)
+            out[cuiStr] = ANAFCompany(cui: cuiStr, denumire: dg["denumire"] as? String,
+                                     adresa: dg["adresa"] as? String, scpTVA: tva)
         }
         return out
     }

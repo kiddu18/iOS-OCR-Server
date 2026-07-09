@@ -30,7 +30,13 @@
                 </div>
                 <input type="text" id="server-ip" value="http://192.168.1.11:8000" placeholder="ex: http://192.168.1.x:8000" style="margin-bottom: 12px;">
                 <label>CUI Firma Mea (Cumpărător)</label>
-                <input type="text" id="buyer-cui" value="" placeholder="ex: RO12345678">
+                <input type="text" id="buyer-cui" value="" placeholder="ex: RO12345678" style="margin-bottom: 12px;">
+                <label>Tip Documente Încărcate</label>
+                <select id="processing-mode" style="width: 100%; padding: 10px; background: var(--bg-main); border: 1px solid var(--border); color: white; border-radius: 6px; font-family: inherit; font-size: 0.9rem; outline: none; cursor: pointer;">
+                    <option value="auto">Detecție Automată (Recomandat)</option>
+                    <option value="bon">Forțează Bon Fiscal</option>
+                    <option value="chitanta">Forțează Chitanță de mână</option>
+                </select>
             </div>
         </aside>
 
@@ -72,7 +78,7 @@
                                     <th>Total (fără TVA)</th>
                                     <th>TVA Valoric</th>
                                     <th>Cote TVA (%)</th>
-                                    <th>Total (cu TVA)</th>
+                                    <th id="header-total">Total (cu TVA)</th>
                                     <th>Cont Sugerat</th>
                                     <th>Acțiuni</th>
                                 </tr>

@@ -101,6 +101,13 @@ function renderPipeline() {
         return;
     }
     
+    // Dynamic renaming of total header
+    const hasChitante = pipeline.some(x => x.data && (x.data.documentType === 'Chitanță de mână' || x.data.documentType === 'Chitanță POS'));
+    const totalHeader = document.getElementById('header-total');
+    if (totalHeader) {
+        totalHeader.innerText = hasChitante ? 'Total / Sumă Plătită' : 'Total (cu TVA)';
+    }
+    
     tbody.innerHTML = '';
     pipeline.forEach((item, index) => {
         let statusHtml = '';
@@ -115,6 +122,7 @@ function renderPipeline() {
         if (item.status === 'error') statusHtml = `<span class="status-badge status-err"><i class="ph ph-x-circle"></i> Eroare</span>`;
 
         const d = item.data || {};
+        const isChitanta = d.documentType === 'Chitanță de mână' || d.documentType === 'Chitanță POS';
         
         // Editable fields if done
         const typeHtml = item.status === 'done' ? `<input class="inline-input" value="${d.documentType || ''}" onchange="updateItem('${item.id}', 'documentType', this.value)">` : '-';
@@ -124,10 +132,10 @@ function renderPipeline() {
         const cuiHtml = item.status === 'done' ? `<input class="inline-input" value="${d.cui || ''}" onchange="updateItem('${item.id}', 'cui', this.value)" title="${d.companyName || ''}">` : '-';
         const companyHtml = item.status === 'done' ? `<input class="inline-input" style="width: 150px" value="${d.companyName || ''}" onchange="updateItem('${item.id}', 'companyName', this.value)">` : '-';
         
-        const baseHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.baseAmount !== undefined ? d.baseAmount : ''}" onchange="updateItem('${item.id}', 'baseAmount', this.value)">` : '-';
+        const baseHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 80px" value="${d.baseAmount !== undefined ? d.baseAmount : ''}" onchange="updateItem('${item.id}', 'baseAmount', this.value)">`) : '-';
         const totalHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.totalAmount || ''}" onchange="updateItem('${item.id}', 'totalAmount', this.value)">` : '-';
-        const vatHtml = item.status === 'done' ? `<input class="inline-input" style="width: 80px" value="${d.vatAmount !== undefined ? d.vatAmount : ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">` : '-';
-        const vatPctHtml = item.status === 'done' ? `<input class="inline-input" style="width: 60px" value="${d.vatPercentages || ''}" onchange="updateItem('${item.id}', 'vatPercentages', this.value)">` : '-';
+        const vatHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 80px" value="${d.vatAmount !== undefined ? d.vatAmount : ''}" onchange="updateItem('${item.id}', 'vatAmount', this.value)">`) : '-';
+        const vatPctHtml = item.status === 'done' ? (isChitanta ? '<span style="color:var(--text-muted)">-</span>' : `<input class="inline-input" style="width: 60px" value="${d.vatPercentages || ''}" onchange="updateItem('${item.id}', 'vatPercentages', this.value)">`) : '-';
         const accHtml = item.status === 'done' ? `<input class="inline-input" value="${d.suggestedAccount || ''}" onchange="updateItem('${item.id}', 'suggestedAccount', this.value)">` : '-';
 
         tbody.innerHTML += `
@@ -201,6 +209,9 @@ async function processNext() {
     if (buyerCuiInput && buyerCuiInput.value.trim() !== "") {
         formData.append('buyer_cui', buyerCuiInput.value.trim());
     }
+    
+    const processingMode = document.getElementById('processing-mode')?.value || 'auto';
+    formData.append('processing_mode', processingMode);
 
     const baseUrl = document.getElementById('server-ip').value.replace(/\/$/, "");
 
@@ -269,6 +280,7 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
 
         rows = doneItems.map(item => {
             const d = item.data;
+            const isChitanta = d.documentType === 'Chitanță de mână' || d.documentType === 'Chitanță POS';
             const row = {};
             // Initialize with empty strings for all template headers to maintain structure
             templateHeaders.forEach(th => row[th] = '');
@@ -280,10 +292,19 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
             if (customMapping.date) row[customMapping.date] = d.documentDate || '';
             if (customMapping.cui) row[customMapping.cui] = d.cui || '';
             if (customMapping.company) row[customMapping.company] = d.companyName || '';
-            if (customMapping.total) row[customMapping.total] = d.totalAmount !== undefined ? d.totalAmount : '';
-            if (customMapping.base) row[customMapping.base] = d.baseAmount !== undefined ? d.baseAmount : '';
-            if (customMapping.vat) row[customMapping.vat] = d.vatAmount !== undefined ? d.vatAmount : '';
-            if (customMapping.vatPercentages) row[customMapping.vatPercentages] = d.vatPercentages || '';
+            
+            if (isChitanta) {
+                row['Sumă Plătită'] = d.totalAmount !== undefined ? d.totalAmount : '';
+                if (customMapping.total) row[customMapping.total] = '';
+                if (customMapping.base) row[customMapping.base] = '';
+                if (customMapping.vat) row[customMapping.vat] = '';
+                if (customMapping.vatPercentages) row[customMapping.vatPercentages] = '';
+            } else {
+                if (customMapping.total) row[customMapping.total] = d.totalAmount !== undefined ? d.totalAmount : '';
+                if (customMapping.base) row[customMapping.base] = d.baseAmount !== undefined ? d.baseAmount : '';
+                if (customMapping.vat) row[customMapping.vat] = d.vatAmount !== undefined ? d.vatAmount : '';
+                if (customMapping.vatPercentages) row[customMapping.vatPercentages] = d.vatPercentages || '';
+            }
             if (customMapping.account) row[customMapping.account] = d.suggestedAccount || '';
             
             return row;
@@ -298,6 +319,10 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
 
         rows = doneItems.map(item => {
             const d = item.data;
+            const isChitanta = d.documentType === 'Chitanță de mână' || d.documentType === 'Chitanță POS';
+            
+            const totalHeader = isChitanta ? 'Sumă Plătită' : mapping.total;
+            
             return {
                 [mapping.filename]: item.name,
                 [mapping.type]: d.documentType || '',
@@ -306,10 +331,10 @@ document.getElementById('export-bulk-btn').addEventListener('click', () => {
                 [mapping.date]: d.documentDate || '',
                 [mapping.cui]: d.cui || '',
                 [mapping.company]: d.companyName || '',
-                [mapping.total]: d.totalAmount !== undefined ? d.totalAmount : '',
-                [mapping.base]: d.baseAmount !== undefined ? d.baseAmount : '',
-                [mapping.vat]: d.vatAmount !== undefined ? d.vatAmount : '',
-                [mapping.vatPercentages]: d.vatPercentages || '',
+                [totalHeader]: d.totalAmount !== undefined ? d.totalAmount : '',
+                [mapping.base]: isChitanta ? '' : (d.baseAmount !== undefined ? d.baseAmount : ''),
+                [mapping.vat]: isChitanta ? '' : (d.vatAmount !== undefined ? d.vatAmount : ''),
+                [mapping.vatPercentages]: isChitanta ? '' : (d.vatPercentages || ''),
                 [mapping.account]: d.suggestedAccount || ''
             };
         });

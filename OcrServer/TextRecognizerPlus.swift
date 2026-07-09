@@ -109,16 +109,23 @@ final class TextRecognizerPlus {
             return image
         }
         
-        let colorSpace = image.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let hasAlpha = image.alphaInfo != .none && image.alphaInfo != .noneSkipLast && image.alphaInfo != .noneSkipFirst
+        let alphaInfo = hasAlpha ? CGImageAlphaInfo.premultipliedLast.rawValue : CGImageAlphaInfo.noneSkipLast.rawValue
+        let bitmapInfo = alphaInfo | CGBitmapInfo.byteOrder32Big.rawValue
+        
         guard let context = CGContext(
             data: nil,
             width: newWidth,
             height: newHeight,
-            bitsPerComponent: image.bitsPerComponent,
+            bitsPerComponent: 8,
             bytesPerRow: 0,
             space: colorSpace,
-            bitmapInfo: image.bitmapInfo.rawValue
-        ) else { return image }
+            bitmapInfo: bitmapInfo
+        ) else {
+            print("[ROTATION] ERROR: Failed to create CGContext for rotation!")
+            return image
+        }
         
         context.translateBy(x: CGFloat(newWidth) / 2.0, y: CGFloat(newHeight) / 2.0)
         context.rotate(by: CGFloat(degree * .pi / 180.0))
