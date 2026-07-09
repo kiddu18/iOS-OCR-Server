@@ -1126,11 +1126,17 @@ class AccountingValidationAgent: AccountingAgent {
         validateMathematically(result: &result)
         
         // === 3. CATEGORIZARE CHELTUIELI (Cont Contabil Sugerat) ===
-        let fullOcrText = boxes.map { $0.text }.joined(separator: " ")
-        let suggestion = AccountSuggestion.suggest(fullText: fullOcrText)
-        result.suggestedAccount = suggestion.account
-        if let note = suggestion.note {
-            result.fiscalWarnings.append(note)
+        if result.documentType == "Chitanță de mână" {
+            result.suggestedAccount = "5311"
+        } else if result.documentType == "Chitanță POS" {
+            result.suggestedAccount = "5125"
+        } else {
+            let fullOcrText = boxes.map { $0.text }.joined(separator: " ")
+            let suggestion = AccountSuggestion.suggest(fullText: fullOcrText)
+            result.suggestedAccount = suggestion.account
+            if let note = suggestion.note {
+                result.fiscalWarnings.append(note)
+            }
         }
         
         // === 4. AVERTISMENTE SPECIFICE ===
@@ -1227,6 +1233,11 @@ public class AccountingOrchestrator {
                 result.baseAmount = result.totalAmount
                 result.vatRequiresVerification = false
                 result.vatBreakdowns = nil
+            }
+            if forced == "Chitanță de mână" {
+                result.suggestedAccount = "5311"
+            } else if forced == "Chitanță POS" {
+                result.suggestedAccount = "5125"
             }
         }
         

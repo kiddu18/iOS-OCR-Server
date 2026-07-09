@@ -115,7 +115,7 @@ def parse_formatted_amount(text):
 
 # --- CUI Helper functions ---
 def is_valid_cui(cui: str) -> bool:
-    if not (2 <= len(cui) <= 10):
+    if not (4 <= len(cui) <= 10):
         return False
     if not cui.isdigit():
         return False
@@ -518,12 +518,20 @@ class FinancialAmountsAgent:
                 
         # Ultimul Fallback: ia cel mai mare numar
         if result.totalAmount is None:
+            cui_float = None
+            if result.cui:
+                clean_cui = "".join(c for c in result.cui if c.isdigit())
+                if clean_cui:
+                    try:
+                        cui_float = float(clean_cui)
+                    except ValueError:
+                        pass
             pattern = r"(?<!%)\b([0-9]{1,3}(?:[.,\s][0-9]{3})+(?:[.,][0-9]{1,2})?|[0-9]+(?:[.,][0-9]{1,2})?)\b(?!\s*%)"
             matches = re.finditer(pattern, full_text)
             amounts = []
             for m in matches:
                 val = parse_formatted_amount(m.group(1))
-                if val is not None:
+                if val is not None and val != cui_float:
                     if val not in [24.0, 21.0, 19.0, 11.0, 9.0, 5.0, 0.0]:
                         amounts.append(val)
             amounts.sort(reverse=True)

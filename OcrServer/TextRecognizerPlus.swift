@@ -17,6 +17,9 @@ import Vision
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
+#if canImport(UIKit)
+import UIKit
+#endif
 
 final class TextRecognizerPlus {
 
@@ -86,10 +89,31 @@ final class TextRecognizerPlus {
 
     private func rotate(_ image: CGImage, orientation: CGImagePropertyOrientation) -> CGImage {
         guard orientation != .up else { return image }
+        
+        #if canImport(UIKit)
+        let uiOrientation: UIImage.Orientation
+        switch orientation {
+        case .down: uiOrientation = .down
+        case .left: uiOrientation = .left
+        case .right: uiOrientation = .right
+        default: uiOrientation = .up
+        }
+        
+        let uiImage = UIImage(cgImage: image, scale: 1.0, orientation: uiOrientation)
+        
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: uiImage.size, format: format)
+        let rotated = renderer.image { _ in
+            uiImage.draw(in: CGRect(origin: .zero, size: uiImage.size))
+        }
+        return rotated.cgImage ?? image
+        #else
         let ci = CIImage(cgImage: image).oriented(orientation)
         let transform = CGAffineTransform(translationX: -ci.extent.origin.x, y: -ci.extent.origin.y)
         let normalized = ci.transformed(by: transform)
         return ciContext.createCGImage(normalized, from: CGRect(origin: .zero, size: normalized.extent.size)) ?? image
+        #endif
     }
 
     // MARK: - 2. OCR la nivel de cuvant

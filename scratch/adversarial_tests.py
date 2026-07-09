@@ -109,7 +109,7 @@ def parse_formatted_amount(text):
     return None
 
 def is_valid_cui(cui: str) -> bool:
-    if not (2 <= len(cui) <= 10):
+    if not (4 <= len(cui) <= 10):
         return False
     if not cui.isdigit():
         return False
@@ -446,11 +446,19 @@ class FinancialAmountsAgent:
                 total_found = True
 
         if not total_found:
+            cui_float = None
+            if result.cui:
+                clean_cui = "".join(c for c in result.cui if c.isdigit())
+                if clean_cui:
+                    try:
+                        cui_float = float(clean_cui)
+                    except ValueError:
+                        pass
             matches = re.findall(r"\b([0-9\s]+[.,][0-9]{2})\b", full_text)
             amounts = []
             for m in matches:
                 val = parse_formatted_amount(m)
-                if val is not None and val not in [24.0, 21.0, 19.0, 11.0, 9.0, 5.0]:
+                if val is not None and val not in [24.0, 21.0, 19.0, 11.0, 9.0, 5.0] and val != cui_float:
                     amounts.append(val)
             if amounts:
                 total_amount = max(amounts)
@@ -707,6 +715,12 @@ class AccountingValidationAgent:
             result.totalRequiresVerification = True
 
     def suggest_account(self, result, full_text):
+        if result.documentType == "Chitanță de mână":
+            result.suggestedAccount = "5311"
+            return
+        if result.documentType == "Chitanță POS":
+            result.suggestedAccount = "5125"
+            return
         if any(kw in full_text for kw in ["BENZINA", "MOTORINA", "DIESEL", "GPL", "CARBURANT", "MOL ", "PETROM", "OMV", "ROMPETROL", "LUKOIL", "SOCAR"]):
             result.suggestedAccount = "6022"
         elif any(kw in full_text for kw in ["GAZ ", "GAZE", "MAGISTRAL", "ELECTRICA", "ENEL", "E.ON", "APA ", "HIDRO"]):

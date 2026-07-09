@@ -86,6 +86,8 @@ function handleFiles(files) {
 }
 
 function suggestAccount(companyName, fileType) {
+    if (fileType === 'Chitanță de mână') return '5311';
+    if (fileType === 'Chitanță POS') return '5125';
     const text = (companyName || '').toUpperCase();
     for (let rule of accountRules) {
         if (text.includes(rule.keyword)) return rule.account;
