@@ -52,8 +52,108 @@ enum ReceiptSegmenter {
 
         let finalSegments = split.filter { $0.count >= 14 }
         print("[SEGMENTER] Final segments count>=14: \(finalSegments.count)")
+
+        // FALLBACK: dacă xycut a produs doar 1 segment dar sunt >=50 cuvinte,
+        // imaginea e probabil rotită sau bonurile se ating. Folosim anchor-based clustering.
+        if finalSegments.count <= 1 && words.count >= 50 {
+            let anchored = anchorBasedSegment(words)
+            if anchored.count > finalSegments.count {
+                print("[SEGMENTER] Anchor-based fallback produced \(anchored.count) segments (xycut had \(finalSegments.count))")
+                return anchored
+            }
+        }
         
         return finalSegments.sorted { bbox($0).minX < bbox($1).minX || (abs(bbox($0).minX - bbox($1).minX) < 500 && bbox($0).minY < bbox($1).minY) }
+    }
+
+    // MARK: - Anchor-based segmentation (fallback for rotated/touching receipts)
+
+    /// Găsește boxurile cu CUI/COD FISCAL (exclud CLIENT/CNP/CUMPARATOR)
+    /// și grupează toate celelalte boxuri la cel mai apropiat anchor prin distanță Euclidiană.
+    private static func anchorBasedSegment(_ words: [OCRBoxItem]) -> [[OCRBoxItem]] {
+        let buyerPattern = try! NSRegularExpression(pattern: "CLIENT|CUMPARATOR|BENEF|CNP", options: .caseInsensitive)
+        let cuiPattern = try! NSRegularExpression(pattern: "COD\\s*FISCAL|COD\\s*IDENTIFICARE|C\\.?\\s*I\\.?\\s*F[^A-Z]", options: .caseInsensitive)
+
+        var anchors: [OCRBoxItem] = []
+        
+        // 1) Găsim boxuri cu COD FISCAL / CIF care conțin cel puțin 4 cifre
+        for box in words {
+            let text = box.text
+            let range = NSRange(text.startIndex..., in: text)
+            if buyerPattern.firstMatch(in: text, range: range) != nil { continue }
+            if cuiPattern.firstMatch(in: text, range: range) != nil {
+                let digitCount = text.filter { $0.isNumber }.count
+                if digitCount >= 4 {
+                    anchors.append(box)
+                }
+            }
+        }
+        
+        // 2) Căutăm și "CIF" standalone urmat de un box cu cifre pe aceeași coloană
+        for box in words {
+            let t = box.text.uppercased().trimmingCharacters(in: .punctuationCharacters).trimmingCharacters(in: .whitespaces)
+            let range = NSRange(box.text.startIndex..., in: box.text)
+            if buyerPattern.firstMatch(in: box.text, range: range) != nil { continue }
+            if t == "CIF" || t == "C I F" {
+                for b2 in words {
+                    if abs(b2.x - box.x) < 30 {
+                        let digits = b2.text.replacingOccurrences(of: " ", with: "").filter { $0.isNumber }.count
+                        if digits >= 7 {
+                            if !anchors.contains(where: { abs($0.x - b2.x) < 20 && abs($0.y - b2.y) < 30 }) {
+                                anchors.append(b2)
+                            }
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3) Deduplicare anchors prea apropiate
+        var deduped: [OCRBoxItem] = []
+        for a in anchors {
+            if !deduped.contains(where: { abs($0.x - a.x) < 40 && abs($0.y - a.y) < 40 }) {
+                deduped.append(a)
+            }
+        }
+        anchors = deduped
+        
+        print("[SEGMENTER-ANCHOR] Found \(anchors.count) CUI anchors")
+        for (i, a) in anchors.enumerated() {
+            print("  Anchor \(i): '\(a.text)' at (\(Int(a.x + a.w/2)), \(Int(a.y + a.h/2)))")
+        }
+        
+        guard anchors.count >= 2 else {
+            print("[SEGMENTER-ANCHOR] Not enough anchors, returning all as 1 segment")
+            return [words]
+        }
+
+        // 4) Asignare prin distanță Euclidiană la cel mai apropiat anchor
+        let centers = anchors.map { (x: $0.x + $0.w / 2, y: $0.y + $0.h / 2) }
+        var groups: [[OCRBoxItem]] = Array(repeating: [], count: anchors.count)
+        
+        for box in words {
+            let bx = box.x + box.w / 2
+            let by = box.y + box.h / 2
+            var bestIdx = 0
+            var bestDist = Double.greatestFiniteMagnitude
+            for (i, c) in centers.enumerated() {
+                let d = (bx - c.x) * (bx - c.x) + (by - c.y) * (by - c.y)
+                if d < bestDist {
+                    bestDist = d
+                    bestIdx = i
+                }
+            }
+            groups[bestIdx].append(box)
+        }
+        
+        // 5) Filtrare grupuri prea mici (zgomot)
+        let result = groups.filter { $0.count >= 5 }
+        print("[SEGMENTER-ANCHOR] Final clusters: \(result.count)")
+        for (i, g) in result.enumerated() {
+            print("  Cluster \(i): \(g.count) boxes")
+        }
+        return result
     }
 
     private static func xycut(_ ws: [OCRBoxItem], minGapX: Double, minGapY: Double, into out: inout [[OCRBoxItem]]) {
