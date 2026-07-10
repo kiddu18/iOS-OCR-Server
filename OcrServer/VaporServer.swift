@@ -353,6 +353,8 @@ actor VaporServer {
             var W = 0
             var H = 0
             var allBoxesOut: [OCRBoxItem] = []
+            var receiptsList: [ReceiptResult]? = nil
+            var chitanteList: [ChitantaResult]? = nil
             
             if PDFDocument(data: data) != nil {
                 let result = await textRecognizer.getOcrResult(data: data)
@@ -425,8 +427,8 @@ actor VaporServer {
                 }
                 
                 // --- 3. Per bon: crop + contrast + re-OCR curat -> extractie
-                var receiptsList: [ReceiptResult] = []
-                var chitanteList: [ChitantaResult] = []
+                receiptsList = []
+                chitanteList = []
                 
                 let myCui = upload.buyer_cui ?? "30630040" // CUI-ul firmei tale (config / camp in upload)
                 
