@@ -353,8 +353,8 @@ actor VaporServer {
             var W = 0
             var H = 0
             var allBoxesOut: [OCRBoxItem] = []
-            var receiptsList: [ReceiptResult]? = nil
-            var chitanteList: [ChitantaResult]? = nil
+            var receiptsList: [ReceiptResult] = []
+            var chitanteList: [ChitantaResult] = []
             
             if PDFDocument(data: data) != nil {
                 let result = await textRecognizer.getOcrResult(data: data)
@@ -621,8 +621,8 @@ actor VaporServer {
                         ocr_boxes: allBoxesOut,
                         accounting_data: accountingData,
                         accounting_data_array: accountingDataArray,
-                        receipts: receiptsList,
-                        chitante: chitanteList
+                        receipts: receiptsList.isEmpty ? nil : receiptsList,
+                        chitante: chitanteList.isEmpty ? nil : chitanteList
                     )
                 )
             } else {
