@@ -296,7 +296,11 @@
       const fd = new FormData();
       fd.append("file", currentFile);
       fd.append("doc_type", $("docType").value);
-      const res = await fetch(apiBase() + "/upload", { method: "POST", body: fd });
+      const res = await fetch(apiBase() + "/upload", {
+        method: "POST",
+        body: fd,
+        headers: { "Accept": "application/json" }
+      });
       const text = await res.text();
       let data;
       try { data = JSON.parse(text); }
