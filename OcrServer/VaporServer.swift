@@ -51,6 +51,8 @@ struct UploadResponse: Content {
     let ocr_boxes: [OCRBoxItem]
     var accounting_data: AccountingResult? = nil
     var accounting_data_array: [AccountingResult]? = nil
+    var receipts: [ReceiptResult]? = nil
+    var chitante: [ChitantaResult]? = nil
 }
 
 actor VaporServer {
@@ -397,105 +399,200 @@ actor VaporServer {
                 H = result?.image_height ?? 0
                 allBoxesOut = result?.boxes ?? []
             } else {
-                let plus = TextRecognizerPlus()
+                let pro = TextRecognizerPro()
                 
-                // --- 1. Detectie orientare + rotire fizica (o singura data, pe toata poza)
-                guard let image = await plus.normalizedCGImage(from: data) else {
+                // --- 1. Imaginea de baza (aplica EXIF-ul pozei)
+                guard let base = pro.baseCGImage(from: data) else {
                     return try Self.jsonResponse(.internalServerError, UploadResponse(
-                        success: false, message: "OCR failed",
+                        success: false, message: "Could not decode image",
                         ocr_result: "", image_width: 0, image_height: 0, ocr_boxes: []))
                 }
                 
-                // --- 2. OCR pe toata poza, la nivel de CUVANT (serveste doar segmentarii)
-                let (allWords, imgW, imgH) = await plus.wordBoxes(on: image)
-                W = imgW
-                H = imgH
+                W = base.width
+                H = base.height
                 
-                // --- 3. Segmentare in bonuri (XY-cut + merge fragmente + split pe antete)
-                let segments = ReceiptSegmenter.segment(allWords)
-                print("Segmente (bonuri) detectate: \(segments.count)")
+                // --- 2. Detectia bonurilor IN TOATE ORIENTARILE (rezolva bonul rotit 90°)
+                let detections = await pro.detectReceipts(in: base)
+                print("Bonuri detectate: \(detections.count)")
                 
-                // --- 4. Per bon: crop + contrast + re-OCR curat -> extractia existenta
-                var segmentTexts: [String] = []
-                for (i, seg) in segments.enumerated() {
-                    let cleanBoxes = await plus.cropAndReOCR(image: image, clusterBoxes: seg)
-                    allBoxesOut.append(contentsOf: cleanBoxes)
-                    print("Bon \(i): \(seg.count) cuvinte -> \(cleanBoxes.count) dupa re-OCR")
-                    
-                    let segText = cleanBoxes.map { $0.text }.joined(separator: " ")
-                    
-                    var forcedType = "Bon Fiscal"
-                    if upload.processing_mode == "chitanta" {
-                        forcedType = "Chitanță de mână"
-                    }
-                    
-                    let results = await AccountingOrchestrator.shared.processOcrResult(
-                        boxes: cleanBoxes,
-                        buyerCui: upload.buyer_cui,
-                        forcedDocumentType: forcedType
-                    )
-                    for _ in results {
-                        segmentTexts.append(segText)
-                    }
-                    accountingDataArray.append(contentsOf: results)
+                // cache pentru imaginile rotite (o rotatie per orientare folosita)
+                var rotatedCache: [Int: CGImage] = [0: base]
+                func rotatedImage(_ turns: Int) -> CGImage {
+                    if let img = rotatedCache[turns] { return img }
+                    let img = TextRecognizerPro.rotate(base, quarterTurnsCCW: turns)
+                    rotatedCache[turns] = img
+                    return img
                 }
                 
-                // --- 5. UN SINGUR batch ANAF v9 pentru toate CUI-urile din poza
-                //        (limita ANAF: 1 request/secunda -> nu apela per bon!)
-                var cuiSet = Set<String>()
-                for result in accountingDataArray {
-                    if let cui = result.cui, CUI.isValid(cui) {
-                        cuiSet.insert(String(Int(cui) ?? 0))
-                    }
-                    for candidate in result.anafCandidates ?? [] where CUI.isValid(candidate) {
-                        cuiSet.insert(String(Int(candidate) ?? 0))
-                    }
-                }
-                let cuis = Array(cuiSet)
-                let anafInfo = await ANAF.verifyBatch(cuis: cuis)
+                // --- 3. Per bon: crop + contrast + re-OCR curat -> extractie
+                var receiptsList: [ReceiptResult] = []
+                var chitanteList: [ChitantaResult] = []
                 
-                for i in accountingDataArray.indices {
-                    var candidates = accountingDataArray[i].anafCandidates ?? []
-                    if let cui = accountingDataArray[i].cui {
-                        candidates.insert(cui, at: 0)
-                    }
-                    candidates = Array(Set(candidates.map { String(Int($0) ?? 0) }.filter { CUI.isValid($0) }))
-                    guard !candidates.isEmpty else { continue }
-
-                    var selected: (cui: String, info: ANAFCompany, score: Double)? = nil
-                    let ocrText = i < segmentTexts.count ? segmentTexts[i] : ""
-                    for candidate in candidates {
-                        guard let info = anafInfo[candidate] else { continue }
-                        let score = info.denumire.map { ANAF.nameMatchScore(anafName: $0, ocrHeader: ocrText) } ?? 0
-                        if selected == nil || score > selected!.score {
-                            selected = (candidate, info, score)
-                        }
-                    }
-                    guard let selected else { continue }
-                    let info = selected.info
+                let myCui = upload.buyer_cui ?? "30630040" // CUI-ul firmei tale (config / camp in upload)
+                
+                for (i, det) in detections.enumerated() {
+                    let rotImg = rotatedImage(det.turns)
+                    let clean = await pro.cropAndReOCR(rotatedImage: rotImg, clusterBoxes: det.words)
+                    let rawLines = ReceiptSegmenterV2.groupLines(clean)
                     
-                    accountingDataArray[i].cui              = selected.cui
-                    accountingDataArray[i].companyName      = info.denumire
-                    accountingDataArray[i].companyAddress   = info.adresa
-                    accountingDataArray[i].companyIsVatPayer = info.scpTVA
-                    
-                    // === DUBLA VALIDARE (ANAF + Similaritate Antet OCR) ===
-                    if let officialName = info.denumire {
-                        let score = selected.score
-                        print("[VALIDATION] CUI \(selected.cui) for company '\(officialName)': Fuzzy match score: \(score)")
-                        if score >= 0.35 {
-                            accountingDataArray[i].cuiRequiresVerification = false // Confirmat 100%
-                        } else {
-                            accountingDataArray[i].cuiRequiresVerification = true // Necesita verificare manuala
-                            accountingDataArray[i].fiscalWarnings.append("Nume necorelat: firma inregistrata la CUI-ul \(selected.cui) (\(officialName)) nu a fost confirmata in antetul bonului (scor: \(Int(score * 100))%).")
-                        }
+                    if ChitantaExtractor.looksLikeChitanta(rawLines.joined(separator: "\n")) {
+                        let hwWords = await pro.handwritingPass(on: rotImg)
+                        let hwLines = ReceiptSegmenterV2.groupLines(hwWords)
+                        var ch = ChitantaExtractor.extract(linesText: hwLines,
+                                                           linesDigits: rawLines,
+                                                           myCui: myCui)
+                        ch.confidence = 0.9
+                        // We map the clean words back to base image space for debug overlay
+                        allBoxesOut.append(contentsOf: TextRecognizerPro.mapWordsToBase(
+                            clean, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height))
+                        chitanteList.append(ch)
                     } else {
-                        accountingDataArray[i].cuiRequiresVerification = false
+                        var r = ReceiptExtractor.extract(lines: rawLines, index: i, buyerCuiHint: upload.buyer_cui)
+                        r.orientation = det.turns
+                        r.bboxX = Double(det.baseRect.minX)
+                        r.bboxY = Double(det.baseRect.minY)
+                        r.bboxW = Double(det.baseRect.width)
+                        r.bboxH = Double(det.baseRect.height)
+                        // We map the clean words back to base image space for debug overlay
+                        allBoxesOut.append(contentsOf: TextRecognizerPro.mapWordsToBase(
+                            clean, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height))
+                        receiptsList.append(r)
                     }
+                }
+                
+                // --- 4. UN SINGUR batch ANAF v9 pentru toate CUI-urile din poza
+                //        (limita ANAF: 1 request/secunda -> nu apela per bon!)
+                var allCandidates: [String] = []
+                for r in receiptsList {
+                    allCandidates.append(contentsOf: r.anafCandidates)
+                    if let b = r.buyerCui, RoCUI.isValid(b) { allCandidates.append(b) }
+                }
+                for ch in chitanteList {
+                    allCandidates.append(contentsOf: ch.anafCandidatesEmitent)
+                    if let p = ch.platitorCui, RoCUI.isValid(p) { allCandidates.append(p) }
+                }
+                
+                let anafInfo = await AnafClient.shared.verifyBatch(allCandidates)
+                
+                // --- 5. Dubla validare per bon: checksum + potrivire de denumire ANAF
+                for i in receiptsList.indices {
+                    let header = receiptsList[i].merchantNameOCR ?? ""
+                    let res = AnafResolver.resolve(candidates: receiptsList[i].anafCandidates,
+                                                   checksumWasValid: receiptsList[i].cuiChecksumValid,
+                                                   ocrHeader: header,
+                                                   anaf: anafInfo)
+                    receiptsList[i].anaf.checked = !receiptsList[i].anafCandidates.isEmpty
+                    receiptsList[i].anaf.status = res.status
+                    receiptsList[i].anaf.nameScore = res.score
+                    
+                    if let comp = res.company {
+                        receiptsList[i].cui = res.cui
+                        receiptsList[i].anaf.found = true
+                        receiptsList[i].anaf.denumire = comp.denumire
+                        receiptsList[i].anaf.adresa = comp.adresa
+                        receiptsList[i].anaf.scpTVA = comp.scpTVA
+                        if comp.statusInactiv == true {
+                            receiptsList[i].warnings.append("ATENTIE: firma figureaza INACTIVA la ANAF — TVA nedeductibila (art. 11 CF).")
+                        }
+                        if comp.scpTVA == false {
+                            receiptsList[i].warnings.append("Firma NU e platitoare de TVA la data interogarii — verifica deducerea.")
+                        }
+                    } else if res.status == "cui_incert_necesita_verificare" || res.status == "cui_negasit_anaf" {
+                        receiptsList[i].warnings.append("CUI neconfirmat de ANAF — necesita verificare manuala.")
+                    }
+                    
+                    // numele cumparatorului, daca CUI-ul lui a fost si el verificat
+                    if let b = receiptsList[i].buyerCui, let comp = anafInfo[b] {
+                        receiptsList[i].buyerName = comp.denumire ?? receiptsList[i].buyerName
+                    }
+                }
+                
+                for i in chitanteList.indices {
+                    let res = AnafResolver.resolve(candidates: chitanteList[i].anafCandidatesEmitent,
+                                                   checksumWasValid: chitanteList[i].emitentCuiValid,
+                                                   ocrHeader: chitanteList[i].emitentNume ?? "",
+                                                   anaf: anafInfo)
+                    chitanteList[i].emitentAnaf.status = res.status
+                    chitanteList[i].emitentAnaf.nameScore = res.score
+                    if let comp = res.company {
+                        chitanteList[i].emitentCui = res.cui
+                        chitanteList[i].emitentAnaf.found = true
+                        chitanteList[i].emitentAnaf.denumire = comp.denumire
+                        chitanteList[i].emitentAnaf.adresa = comp.adresa
+                        chitanteList[i].emitentAnaf.scpTVA = comp.scpTVA
+                    }
+                    if let p = chitanteList[i].platitorCui, let comp = anafInfo[p] {
+                        chitanteList[i].platitorAnaf.found = true
+                        chitanteList[i].platitorAnaf.denumire = comp.denumire
+                        chitanteList[i].platitorAnaf.status = "confirmat_anaf"
+                        // dubla validare si pe nume, daca "Am primit de la" a fost citit:
+                        if let nume = chitanteList[i].platitorNume {
+                            chitanteList[i].platitorAnaf.nameScore =
+                                AnafClient.nameMatchScore(anafName: comp.denumire ?? "", ocrHeader: nume)
+                        }
+                    }
+                }
+                
+                fullText = receiptsList.map { $0.rawText }.joined(separator: "\n\n---\n\n")
+                if !chitanteList.isEmpty {
+                    fullText += "\n\n=== CHITANTE ===\n\n" + chitanteList.map { $0.rawText }.joined(separator: "\n\n---\n\n")
+                }
+                
+                // --- 6. Populare pentru compatibilitate backward (pipeline-ul din table-ul vechi)
+                for r in receiptsList {
+                    var acc = AccountingResult()
+                    acc.documentType = "Bon Fiscal"
+                    acc.documentTypeRequiresVerification = false
+                    acc.documentNumber = r.bonNumber
+                    acc.documentDate = r.date
+                    acc.cui = r.cui
+                    acc.cuiRequiresVerification = r.warnings.contains { $0.contains("CUI") } || !r.cuiChecksumValid
+                    acc.companyName = r.anaf.found ? r.anaf.denumire : r.merchantNameOCR
+                    acc.companyAddress = r.anaf.adresa
+                    acc.companyIsVatPayer = r.anaf.scpTVA
+                    acc.totalAmount = r.total
+                    acc.totalRequiresVerification = !r.mathVerified
+                    acc.vatAmount = r.vatLines.first?.amount
+                    acc.vatRequiresVerification = !r.mathVerified
+                    acc.vatPercentages = r.vatLines.first.map { String($0.rate) }
+                    if let base = r.vatLines.first?.base {
+                        acc.baseAmount = base
+                    } else if let total = r.total, let vat = r.vatLines.first?.amount {
+                        acc.baseAmount = total - vat
+                    } else {
+                        acc.baseAmount = r.total
+                    }
+                    acc.suggestedAccount = r.suggestedAccount
+                    acc.fiscalWarnings = r.warnings
+                    acc.anafCandidates = r.anafCandidates
+                    accountingDataArray.append(acc)
+                }
+                
+                for ch in chitanteList {
+                    var acc = AccountingResult()
+                    acc.documentType = "Chitanță de mână"
+                    acc.documentTypeRequiresVerification = false
+                    acc.documentSeries = ch.serie
+                    acc.documentNumber = ch.numar
+                    acc.documentDate = ch.date
+                    acc.cui = ch.emitentCui
+                    acc.cuiRequiresVerification = !ch.emitentCuiValid
+                    acc.companyName = ch.emitentAnaf.found ? ch.emitentAnaf.denumire : ch.emitentNume
+                    acc.companyAddress = ch.emitentAnaf.adresa
+                    acc.companyIsVatPayer = ch.emitentAnaf.scpTVA
+                    acc.totalAmount = ch.suma
+                    acc.totalRequiresVerification = !ch.sumaConfirmata
+                    acc.vatAmount = 0
+                    acc.vatRequiresVerification = false
+                    acc.vatPercentages = "-"
+                    acc.baseAmount = ch.suma
+                    acc.suggestedAccount = ch.suggestedAccount
+                    acc.fiscalWarnings = ch.warnings
+                    acc.anafCandidates = ch.anafCandidatesEmitent
+                    accountingDataArray.append(acc)
                 }
                 
                 accountingData = accountingDataArray.first
-                fullText = allBoxesOut.map { $0.text }.joined(separator: " ")
                 
                 // === STOCARE PENTRU /debug_boxes ===
                 do {
@@ -521,7 +618,9 @@ actor VaporServer {
                         image_height: H,
                         ocr_boxes: allBoxesOut,
                         accounting_data: accountingData,
-                        accounting_data_array: accountingDataArray
+                        accounting_data_array: accountingDataArray,
+                        receipts: receiptsList,
+                        chitante: chitanteList
                     )
                 )
             } else {

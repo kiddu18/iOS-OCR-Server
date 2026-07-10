@@ -187,6 +187,12 @@ window.viewImage = function(id) {
         if (item.data && item.data.fiscalWarnings && item.data.fiscalWarnings.length > 0) {
             warnDiv.innerHTML = `<strong>Alerte Fiscale:</strong><br>` + item.data.fiscalWarnings.join('<br>');
         }
+        
+        if (item.rawResponse) {
+            if (typeof renderReceipts === 'function') renderReceipts(item.rawResponse);
+            if (typeof renderChitante === 'function') renderChitante(item.rawResponse);
+        }
+        
         document.getElementById('image-modal').classList.remove('hidden');
     }
 }
@@ -223,6 +229,12 @@ async function processNext() {
         if (!response.ok) throw new Error('Network error');
         const data = await response.json();
         
+        if (data.success) {
+            nextItem.rawResponse = data;
+            if (typeof renderReceipts === 'function') renderReceipts(data);
+            if (typeof renderChitante === 'function') renderChitante(data);
+        }
+
         if (data.success && data.accounting_data_array && data.accounting_data_array.length > 0) {
             // Daca avem un singur bon gasit, updatam randul curent
             if (data.accounting_data_array.length === 1) {
@@ -241,7 +253,8 @@ async function processNext() {
                         name: `${nextItem.name} (Bon ${idx + 1})`,
                         status: 'done',
                         data: accData,
-                        url: nextItem.url
+                        url: nextItem.url,
+                        rawResponse: data
                     });
                 });
             }
