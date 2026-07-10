@@ -297,16 +297,23 @@
       fd.append("file", currentFile);
       fd.append("doc_type", $("docType").value);
       const res = await fetch(apiBase() + "/upload", { method: "POST", body: fd });
-      const data = await res.json();
+      const text = await res.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch {
+        throw new Error("HTTP " + res.status + " — serverul a răspuns cu " +
+          (text.trimStart().startsWith("<") ? "o pagină HTML" : "conținut ne-JSON") +
+          " în loc de JSON. Ruta POST /upload nu răspunde corect (verifică ruta, numele câmpului „file” și defaultMaxBodySize).");
+      }
       if (!res.ok || data.success === false) {
-        throw new Error(data.message || "Serverul a răspuns cu eroare.");
+        throw new Error(data.message || data.reason || ("Eroare HTTP " + res.status));
       }
       lastData = data;
       render(data);
       statusEl.textContent = data.message || "Gata.";
     } catch (err) {
       statusEl.classList.add("error");
-      statusEl.textContent = "Procesarea a eșuat: " + err.message + " Încearcă o poză mai clară sau reia.";
+      statusEl.textContent = "Procesarea a eșuat: " + err.message;
     } finally {
       processBtn.disabled = false;
       processBtn.textContent = "Procesează";
