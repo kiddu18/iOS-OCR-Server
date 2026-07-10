@@ -104,6 +104,9 @@ actor VaporServer {
         )
         let cors = CORSMiddleware(configuration: corsConfiguration)
         app.middleware.use(cors, at: .beginning)
+        
+        let publicDir = Bundle.main.resourcePath ?? ""
+        app.middleware.use(FileMiddleware(publicDirectory: publicDir))
 
         try routes(app)
 
@@ -179,104 +182,19 @@ actor VaporServer {
             return Response(status: .ok, headers: headers, body: .init(string: "{\"status\":\"ok\"}"))
         }
         
-        // GET /
-        app.get { [weak self] req async throws -> Response in
-            guard let self else { throw Abort(.internalServerError) }
-
-            // 從 actor 讀取屬性要 await
-            let port = await self.port
-            
-            var docOcrCheckBox = ""
-            var docOcrApiPre = ""
-            if #available(iOS 26, *) {
-                docOcrCheckBox = """
-                <div>
-                    <input type="checkbox" id="docOcr" name="docOcr"/>
-                    <label for="docOcr">Document Paragraph Detection</label>
-                </div><br>
-                """
-                
-                docOcrApiPre = """
-                OR
-                <h3>Upload an image via <code>docOCR</code> API:</h3>
-                <pre><code>curl -H "Accept: application/json" \\
-                  -X POST http://&lt;YOUR IP&gt;:\(port)/docOCR \\
-                  -F "file=@01.png"</code></pre>
-                """
-            } else {
-                docOcrCheckBox = ""
-                docOcrApiPre = ""
+        let serveWebClient: @Sendable (Request) throws -> Response = { req in
+            guard let url = Bundle.main.url(forResource: "webclient_index", withExtension: "html"),
+                  let html = try? String(contentsOf: url, encoding: .utf8) else {
+                throw Abort(.notFound, reason: "webclient_index.html lipseste din bundle — verifica Copy Bundle Resources")
             }
-
-            let html = """
-            <!doctype html>
-            <html>
-            <head>
-                <meta charset="utf-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>OCR Server</title>
-                <style>
-                    code {
-                        background: #dadada;
-                        padding: 2px 6px;
-                        font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-                        font-size: 0.85em;
-                        font-weight: 600;
-                        border-radius: 5px;
-                    }
-                    pre {
-                        background: #dadada;
-                        padding: 16px;
-                        overflow: auto;
-                        font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-                        font-size: 0.85em;
-                        line-height: 1.45;
-                        border-radius: 5px;
-                    }
-                    pre code {
-                        background: transparent;
-                        padding: 0;
-                        font-size: inherit;
-                        color: inherit;
-                        font-weight: normal;
-                    }
-                </style>
-            </head>
-            <body>
-                <h1>OCR Server</h1>
-                <h3>Upload an image via <code>upload</code> API:</h3>
-                <pre><code>curl -H "Accept: application/json" \\
-              -X POST http://&lt;YOUR IP&gt;:\(port)/upload \\
-              -F "file=@01.png"</code></pre>
-                \(docOcrApiPre)
-                <hr>
-                <h3>OCR Test:</h3>
-                <form id="ocrForm" action="/upload" method="post" enctype="multipart/form-data">
-                    \(docOcrCheckBox)
-                    <label>
-                        Choose file:
-                        <input type="file" name="file" required>
-                    </label>
-                    <br><br>
-                    <input type="submit" value="Upload file">
-                </form>
-            </body>
-            <script>
-                const form = document.getElementById("ocrForm");
-                const docOcr = document.getElementById("docOcr");
-
-                form.addEventListener("submit", function () {
-                    if (docOcr && docOcr.checked) {
-                        form.action = "/docOCR";
-                    } else {
-                        form.action = "/upload";
-                    }
-                });
-            </script>
-            </html>
-            """
-            return Self.htmlResponse(html)
+            var headers = HTTPHeaders()
+            headers.replaceOrAdd(name: .contentType, value: "text/html; charset=utf-8")
+            headers.replaceOrAdd(name: .cacheControl, value: "no-store")
+            return Response(status: .ok, headers: headers, body: .init(string: html))
         }
+        
+        app.get(use: serveWebClient)
+        app.get("webclient_index.html", use: serveWebClient)
         // GET /debug_boxes - returneaza ultimele box-uri OCR procesate (pentru debug)
         app.get("debug_boxes") { req -> Response in
             let res = Response(status: .ok)
