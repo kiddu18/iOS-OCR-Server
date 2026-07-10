@@ -215,6 +215,7 @@ actor VaporServer {
                 var file: File 
                 var buyer_cui: String?
                 var processing_mode: String?
+                var doc_type: String?
             }
 
             let upload: Upload
@@ -349,19 +350,27 @@ actor VaporServer {
                 chitanteList = []
                 
                 let myCui = upload.buyer_cui ?? "30630040" // CUI-ul firmei tale (config / camp in upload)
+                // selectorul din pagina: "auto" | "bon" | "chitanta" (doc_type = clientul nou, processing_mode = cel vechi)
+                let mode = (upload.doc_type ?? upload.processing_mode ?? "auto").lowercased()
                 
                 for (i, det) in detections.enumerated() {
                     let rotImg = rotatedImage(det.turns)
                     let clean = await pro.cropAndReOCR(rotatedImage: rotImg, clusterBoxes: det.words)
                     let rawLines = ReceiptSegmenterV2.groupLines(clean)
                     
-                    if ChitantaExtractor.looksLikeChitanta(rawLines.joined(separator: "\n")) {
+                    let autoIsChitanta = ChitantaExtractor.looksLikeChitanta(rawLines.joined(separator: "\n"))
+                    let treatAsChitanta: Bool
+                    switch mode {
+                    case "chitanta": treatAsChitanta = true
+                    case "bon":      treatAsChitanta = false
+                    default:         treatAsChitanta = autoIsChitanta
+                    }
+                    if treatAsChitanta {
                         let hwWords = await pro.handwritingPass(on: rotImg)
                         let hwLines = ReceiptSegmenterV2.groupLines(hwWords)
                         var ch = ChitantaExtractor.extract(linesText: hwLines,
                                                            linesDigits: rawLines,
                                                            myCui: myCui)
-                        ch.confidence = 0.9
                         // We map the clean words back to base image space for debug overlay
                         allBoxesOut.append(contentsOf: TextRecognizerPro.mapWordsToBase(
                             clean, turns: det.turns, rotatedW: rotImg.width, rotatedH: rotImg.height))
@@ -532,15 +541,17 @@ actor VaporServer {
                     .ok,
                     UploadResponse(
                         success: true,
-                        message: "File uploaded successfully",
+                        message: (receiptsList.isEmpty && chitanteList.isEmpty)
+                            ? "File uploaded successfully (pipeline v2: 0 documente detectate)"
+                            : "\(receiptsList.count) bonuri, \(chitanteList.count) chitante detectate",
                         ocr_result: fullText,
                         image_width: W,
                         image_height: H,
                         ocr_boxes: allBoxesOut,
                         accounting_data: accountingData,
                         accounting_data_array: accountingDataArray,
-                        receipts: receiptsList.isEmpty ? nil : receiptsList,
-                        chitante: chitanteList.isEmpty ? nil : chitanteList
+                        receipts: receiptsList,
+                        chitante: chitanteList
                     )
                 )
             } else {
